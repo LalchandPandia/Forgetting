@@ -1,0 +1,222 @@
+[project]
+name = "open-instruct"
+dynamic = ["version"]
+description = "Train open, instruction-following language models"
+readme = "README.md"
+requires-python = "==3.12.*"
+dependencies = [
+    "accelerate>=1.10.1",
+    "antlr4-python3-runtime==4.11",
+    "backoff>=2.2.1",
+    "bitsandbytes>=0.44.1; platform_system != 'Darwin'",
+    "datasets>=4.0.0",
+    "debugpy>=1.8.13",
+    "deepspeed>=0.18.3",
+    "hf-transfer>=0.1.8",
+    "litellm>=1.72.0,<1.75.2", # avoid needing backoff https://github.com/BerriAI/litellm/issues/13827
+    "matplotlib>=3.9.3",
+    "multiprocess<0.70.18", # avoid AttributeError in ResourceTracker.__del__
+    "nltk>=3.9.1",
+    "numpy>=2",
+    "ai2-olmo-core",
+    "nvitop>=1.4.2",
+    "packaging>=24.2",
+    "peft>=0.13.2",
+    "pyarrow>=20.0.0",
+    "pyyaml>=6.0.2",
+    "ray[default]>=2.49.2",
+    "setuptools>=75.6.0,<80.0.0",
+    "tensorboard>=2.18.0",
+    "torch>=2.10.0",
+    "transformers>=5.4.0",
+    "vllm>=0.19.1; platform_system != 'Darwin'",
+    "wandb==0.23.1",
+    "langdetect==1.0.9",
+    "immutabledict==1.2.0",
+    "flash-attn>=2.8.3; platform_system != 'Darwin' and platform_machine != 'aarch64'",
+    # The flat FA3 wheel index can publish a newer aarch64-only build than the latest x86_64 build.
+    # Pin the Linux x86_64 wheel directly so uv doesn't resolve to an aarch64-only version.
+    "flash-attn-3 @ https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.03.19-850211f/flash_attn_3-3.0.0%2B20260318.cu128torch2100cxx11abitrue.8afc61-cp39-abi3-linux_x86_64.whl ; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "flash-attn-4 @ https://github.com/Dao-AILab/flash-attention/releases/download/fa4-v4.0.0.beta6/flash_attn_4-4.0.0b5-py3-none-any.whl ; platform_system != 'Darwin'",
+    "liger-kernel>=0.7.0; platform_system != 'Darwin'",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "mcp>=1.9.0",
+    "openenv-core>=0.2.1",
+    "docker>=7.0.0",
+    "flash-linear-attention>=0.5.0",
+    # Provides the tilelang backend for fla's gated chunk_bwd_dqkwg, which fla routes to on
+    # Hopper with Triton>=3.4.0 (the Triton kernel produces incorrect gradients there; see fla #640).
+    "tilelang>=0.1.0; platform_system == 'Linux' and platform_machine == 'x86_64'",
+]
+
+[build-system]
+requires = ["setuptools", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["open_instruct"]
+
+[tool.setuptools_scm]
+write_to = "open_instruct/_version.py"
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [{ requirement = "torch", match-runtime = true }]
+flash-attn-3 = [{ requirement = "torch", match-runtime = true }]
+
+[tool.uv.extra-build-variables]
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
+flash-attn-3 = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
+
+# pytorch related setups
+[tool.uv.sources]
+ai2-olmo-core = { git = "https://github.com/allenai/OLMo-core.git", rev = "9aa3280fd5331b93fc766206eadec42ee73befc0" }
+flash-attn = [
+  { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu128torch2.10-cp312-cp312-linux_x86_64.whl", marker = "platform_system == 'Linux' and platform_machine == 'x86_64'" },
+]
+
+torch = [
+  { index = "pytorch-cu128", marker = "platform_system == 'Linux' and platform_machine != 'aarch64'"},
+  { index = "pytorch-cu130", marker = "platform_system == 'Linux' and platform_machine == 'aarch64'"},
+]
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[project.optional-dependencies]
+code = [
+    "pydantic>=2.0.0",
+    "requests>=2.28.0",
+]
+dr-tulu = [
+    "dr_agent",
+    "authlib",
+    "scipy",
+]
+
+[tool.uv]
+preview = true
+python-preference = "only-managed"
+link-mode = "hardlink"
+override-dependencies = [
+    "transformers>=5.4.0",
+]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "sys_platform == 'darwin'",
+]
+
+[dependency-groups]
+dev = [
+    "beaker-py>=2.5.7",
+    "mkdocs-material>=9.6.8",
+    "pytest>=8.3.4",
+    "ruff>=0.11.13",
+    "ty>=0.0.1a13",
+    "parameterized>=0.9.0",
+    "rich>=13.7.0",
+    "responses>=0.25.8",
+    "pre-commit>=4.5.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "--ignore=oe-eval-internal/"
+filterwarnings = [
+    "ignore:.*sentry_sdk.Hub.*:DeprecationWarning",
+    "ignore:builtin type SwigPy.*:DeprecationWarning",
+]
+
+
+[tool.black]
+line-length = 119
+target-version = ['py310']
+
+[tool.ruff]
+target-version = "py310"
+line-length = 119
+src = ["open_instruct"]
+exclude = ["wandb"]
+
+[tool.ruff.format]
+# Use black-compatible formatting
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+# Preserve original parentheses style to minimize changes
+skip-magic-trailing-comma = true
+# Enable black-compatible string normalization
+docstring-code-format = false
+
+[tool.ruff.lint]
+# Enable rules equivalent to previous autoflake and flake8 configs:
+# F = Pyflakes (covers autoflake functionality)
+# E = pycodestyle errors (flake8)
+# W = pycodestyle warnings (flake8)
+# I = isort
+# SIM = flake8-simplify
+# UP = pyupgrade
+# B = flake8-bugbear
+select = ["F", "E", "W", "I", "SIM", "UP", "B", "PLC0415"]
+ignore = [
+    "B905", # zip() without explicit strict= parameter
+    "C408", # dict() calls (stylistic)
+    "C901", # function complexity
+    "E501", # Line too long (handled by line-length setting)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["open_instruct", "mason"]
+# case insensitive to match isort --profile black
+case-sensitive = false
+# Disable split-on-trailing-comma to work with skip-magic-trailing-comma
+split-on-trailing-comma = false
+
+# Ignore unresolved imports because some packages (e.g. vllm) are not available on macOS
+# Ignore possibly-missing-attribute for torch.distributed which has incomplete type stubs
+[tool.ty.rules]
+unresolved-import = "ignore"
+possibly-missing-attribute = "ignore"
+unused-ignore-comment = "ignore"
+
+[tool.ty.src]
+exclude = [
+    "scripts/",
+    "decontamination/",
+    "human_eval/",
+    "open_instruct/test_*.py",
+    "test_*.py",
+    "open_instruct/IFEvalG/instructions.py",
+    "open_instruct/dpo.py",
+    "open_instruct/dpo_tune_cache.py",
+    "open_instruct/dpo_utils.py",
+    "open_instruct/environments/tools/tests/test_tools.py",
+    "open_instruct/environments/tools/tools.py",
+    "open_instruct/experimental/oai_generate.py",
+    "open_instruct/finetune.py",
+    "open_instruct/ground_truth_utils.py",
+    "open_instruct/grpo_fast.py",
+    "open_instruct/merge_lora.py",
+    "open_instruct/model_utils.py",
+    "open_instruct/numpy_dataset_conversion.py",
+    "open_instruct/olmo_core_utils.py",
+    "open_instruct/rejection_sampling/generation.py",
+    "open_instruct/rejection_sampling/rejection_sampling.py",
+    "open_instruct/reward_modeling.py",
+    "open_instruct/rubrics/rubric_utils.py",
+    "open_instruct/rubrics/test_rubrics.py",
+    "open_instruct/sample_logits_vllm.py",
+    "open_instruct/utils.py",
+    "open_instruct/vllm_utils.py",
+]
