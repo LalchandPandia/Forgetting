@@ -47,8 +47,6 @@ logger = logger_utils.setup_logger(__name__)
 
 
 _OLMO_CORE_TO_HF_ATTN: dict[AttentionBackendName, str] = {
-    AttentionBackendName.flash_4: "flash_attention_4",
-    AttentionBackendName.flash_3: "flash_attention_3",
     AttentionBackendName.flash_2: "flash_attention_2",
     AttentionBackendName.torch: "sdpa",
     AttentionBackendName.te: "sdpa",
