@@ -65,22 +65,9 @@ def detect_hf_attn_implementation() -> str:
 
 
 @functools.lru_cache(maxsize=1)
-def _gpu_compute_major() -> int | None:
-    """Return the CUDA compute capability major version (e.g. 9=Hopper, 10=Blackwell)."""
-    if not torch.cuda.is_available():
-        return None
-    major, _ = torch.cuda.get_device_capability()
-    return major
-
-
-@functools.lru_cache(maxsize=1)
 def detect_attn_implementation() -> AttentionBackendName:
     if not torch.cuda.is_available():
         result = AttentionBackendName.torch
-    elif transformers.utils.is_flash_attn_4_available() and _gpu_compute_major() >= 10:
-        result = AttentionBackendName.flash_4
-    elif transformers.utils.is_flash_attn_3_available() and _gpu_compute_major() >= 9:
-        result = AttentionBackendName.flash_3
     elif transformers.utils.is_flash_attn_2_available():
         result = AttentionBackendName.flash_2
     else:

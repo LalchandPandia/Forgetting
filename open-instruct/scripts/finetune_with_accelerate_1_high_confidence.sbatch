@@ -3,16 +3,13 @@
 #SBATCH --output=example_sbatch_subset_confidence_olmo2_7B_5.out
 #SBATCH --error=example_sbatch_subset_confidence_olmo2_7B_5.err
 #SBATCH --partition=general
-#SBATCH --gpus-per-node=4
+#SBATCH --gpus-per-node=2
 #SBATCH --nodes=1
 #SBATCH --mem=128G
 #SBATCH --constraint='a100|h100|h200'
-module purge
-# Load CUDA
-module load cuda/11.8
+
 # Activate conda
 source ~/.bashrc
-conda activate /net/scratch/lcpandia/python_3_11
 echo "hostname $(hostname)"
 which python
 nvcc --version
@@ -21,7 +18,7 @@ nvidia-smi
 echo $PATH
 echo "hostname $(hostname)"
 MODEL_SIZE=7B
-NUM_GPUS=4
+NUM_GPUS=2
 BATCH_SIZE_PER_GPU=1
 TOTAL_BATCH_SIZE=128
 dataset=MedQA
@@ -50,6 +47,7 @@ model_name='allenai/OLMo-2-1124-7B'
 #model_name='meta-llama/Meta-Llama-3-8B'
 #model_name='meta-llama/Llama-3.2-1B'
 #model_name='allenai/OLMo-2-0425-1B'
+model_name='Qwen-2.5-1.5B-Instruct'
 export MASTER_PORT=$(shuf -i 29500-29999 -n 1)
 #export WANDB_MODE=offline
 accelerate launch \
