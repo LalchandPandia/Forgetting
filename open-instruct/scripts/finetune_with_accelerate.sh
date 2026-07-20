@@ -1,36 +1,59 @@
 #!/bin/bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+#SBATCH --job-name=new_job_context_sbatch
+#SBATCH --output=example_sbatch_subset_forgetting_qwen_full.out
+#SBATCH --error=example_sbatch_subset_forgetting_qwen_full.err
+#SBATCH --partition=general
+#SBATCH --gpus-per-node=4
+#SBATCH --nodes=1
+#SBATCH --mem=128G
+#SBATCH --constraint='a100|h100|h200'
 
-MODEL_SIZE=7B
+# Activate conda
+echo "hostname $(hostname)"
+which python
+nvcc --version
+nvidia-smi
+
+echo $PATH
+echo "hostname $(hostname)"
+dataset=ifeval
+model_name="qwen2.5"
+
+MODEL_SIZE=1.5B
 NUM_GPUS=4
 BATCH_SIZE_PER_GPU=1
 TOTAL_BATCH_SIZE=128
 GRADIENT_ACC_STEPS=$(($TOTAL_BATCH_SIZE/$NUM_GPUS/$BATCH_SIZE_PER_GPU))
-echo "Training llama model ${MODEL_SIZE} using $NUM_GPUS GPUs, $BATCH_SIZE_PER_GPU batch size per GPU, $GRADIENT_ACC_STEPS gradient accumulation steps"
+echo "Training ${model_name} model ${MODEL_SIZE} using $NUM_GPUS GPUs, $BATCH_SIZE_PER_GPU batch size per GPU, $GRADIENT_ACC_STEPS gradient accumulation steps"
+model='Qwen/Qwen2.5-1.5B-Instruct'
 
-# You can also set --gradient_checkpointing or use `stage3_offloading_accelerate.conf` to save memory,
-# but it will trade off speed.
+export MASTER_PORT=$(shuf -i 29500-29999 -n 1)
+#added to avoid NCCL from using RDMA/IB interface
+export NCCL_IB_DISABLE=1
+train_file=data/sft/ifeval.jsonl
 accelerate launch \
     --mixed_precision bf16 \
     --num_machines 1 \
-    --num_processes $NUM_GPUS \
+    --num_processes ${NUM_GPUS} \
     --use_deepspeed \
     --deepspeed_config_file configs/ds_configs/stage3_no_offloading_accelerate.conf \
     open_instruct/finetune.py \
-    --model_name_or_path ../hf_llama2_models/${MODEL_SIZE} \
-    --tokenizer_name ../hf_llama2_models/${MODEL_SIZE} \
+    --model_name_or_path ${model} \
+    --tokenizer_name ${model} \
     --use_slow_tokenizer \
-    --train_file data/processed/tulu_v2/tulu_v2_data.jsonl \
-    --max_seq_length 8192 \
-    --preprocessing_num_workers 128 \
+    --dataset_mixer_list ${train_file} 1.0 \
+    --dataset_mixer_list_splits train \
+    --max_seq_length 4096 \
+    --preprocessing_num_workers 16 \
+    --checkpointing_steps 64 \
     --per_device_train_batch_size $BATCH_SIZE_PER_GPU \
     --gradient_accumulation_steps $GRADIENT_ACC_STEPS \
-    --learning_rate 2e-5 \
-    --lr_scheduler_type linear \
+    --learning_rate 1e-4 \
+    --lr_scheduler_type cosine \
     --warmup_ratio 0.03 \
     --weight_decay 0. \
     --num_train_epochs 2 \
-    --output_dir output/tulu_v2_${MODEL_SIZE}/ \
+    --output_dir /net/scratch/lcpandia/forgetting/${dataset}_${model_name}_${MODEL_SIZE}_full/ \
     --with_tracking \
-    --report_to tensorboard \
-    --logging_steps 1
+    --report_to wandb \
+    --logging_steps 5
