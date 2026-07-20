@@ -62,11 +62,6 @@ from open_instruct.utils import (
     get_last_checkpoint_path,
     get_optimizer_grouped_parameters,
     get_wandb_tags,
-    is_beaker_job,
-    launch_ai2_evals_on_weka,
-    maybe_get_beaker_config,
-    maybe_update_beaker_description,
-    maybe_use_ai2_hf_entity,
     maybe_use_ai2_wandb_entity,
 )
 
@@ -291,16 +286,12 @@ class FlatArguments:
     """The revision of the saved model in the Hugging Face Hub (can be autoset if not given)"""
     hf_repo_url: str | None = None
     """The url of the saved model in the Hugging Face Hub (will be autoset)"""
-    try_launch_beaker_eval_jobs: bool = True
-    """Whether to launch beaker evaluation jobs after training"""
     hf_metadata_dataset: str | None = "allenai/tulu-3-evals"
     """What dataset to upload the metadata to. If unset, don't upload metadata"""
     cache_dataset_only: bool = False
     """Immediately exit after caching the dataset"""
 
     # Ai2 specific settings
-    try_auto_save_to_beaker: bool = True
-    """Whether to try to save the model to Beaker dataset `/output` after training"""
     gs_bucket_path: str | None = None
     """The path to the gs bucket to save the model to"""
     oe_eval_tasks: list[str] | None = None
@@ -331,8 +322,6 @@ class FlatArguments:
             self.dataset_name is not None and (self.dataset_mixer is not None or self.dataset_mixer_list is not None)
         ) or (self.dataset_mixer is not None and self.dataset_mixer_list is not None):
             raise ValueError("Cannot provide two dataset selection mechanisms.")
-        if self.try_launch_beaker_eval_jobs and not self.push_to_hub:
-            raise ValueError("Cannot launch Beaker evaluation jobs without pushing to the Hub.")
         if self.final_lr_ratio is not None:
             if self.lr_scheduler_type != "linear":
                 raise NotImplementedError("final_lr_ratio only currently implemented for linear schedulers")
@@ -425,20 +414,6 @@ def main(args: FlatArguments, tc: TokenizerConfig):
         args.output_dir = os.path.join(args.output_dir, args.exp_name)
     logger.info("using the output directory: %s", args.output_dir)
     args.dataset_local_cache_dir = os.path.abspath(args.dataset_local_cache_dir)
-    if is_beaker_job():
-        args.dataset_local_cache_dir = "/weka/oe-adapt-default/allennlp/deletable_open_instruct_dataset_cache"
-    if args.push_to_hub and accelerator.is_main_process:
-        if args.hf_repo_id is None:  # auto-generate one
-            args.hf_repo_id = "open_instruct_dev"
-        if args.hf_entity is None:  # first try to use AI2 entity
-            args.hf_entity = maybe_use_ai2_hf_entity()
-        if args.hf_entity is None:  # then try to use the user's entity
-            args.hf_entity = HfApi().whoami()["name"]
-        args.hf_repo_id = f"{args.hf_entity}/{args.hf_repo_id}"
-        if args.hf_repo_revision is None:
-            args.hf_repo_revision = args.exp_name
-        args.hf_repo_url = f"https://huggingface.co/{args.hf_repo_id}/tree/{args.hf_repo_revision}"
-        beaker_config = maybe_get_beaker_config()
 
     # ------------------------------------------------------------
     # Initialize the trackers we use, and also store our configuration.
@@ -451,9 +426,6 @@ def main(args: FlatArguments, tc: TokenizerConfig):
         # (Optional) Ai2 internal tracking
         if args.wandb_entity is None:
             args.wandb_entity = maybe_use_ai2_wandb_entity()
-        if accelerator.is_main_process and is_beaker_job():
-            beaker_config = maybe_get_beaker_config()
-            experiment_config.update(vars(beaker_config))
         experiment_config.update(vars(tc))
         accelerator.init_trackers(
             args.wandb_project_name,
@@ -467,8 +439,6 @@ def main(args: FlatArguments, tc: TokenizerConfig):
             },
         )
         wandb_tracker = accelerator.get_tracker("wandb")
-        if accelerator.is_main_process:
-            maybe_update_beaker_description(wandb_url=wandb_tracker.run.url)
     else:
         wandb_tracker = None  # for later eval launching
 
@@ -952,14 +922,6 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                         accelerator.print(f"{metrics_to_log=}")
                     if args.with_tracking:
                         accelerator.log(metrics_to_log, step=completed_steps)
-                    maybe_update_beaker_description(
-                        current_step=completed_steps,
-                        total_steps=args.max_train_steps,
-                        start_time=start_time,
-                        wandb_url=wandb_tracker.run.url
-                        if wandb_tracker is not None and accelerator.is_main_process
-                        else None,
-                    )
                     total_loss = 0
                     total_aux_loss = 0
 
@@ -998,23 +960,6 @@ def main(args: FlatArguments, tc: TokenizerConfig):
     if args.clean_checkpoints_at_end and accelerator.is_local_main_process:
         clean_last_n_checkpoints(args.output_dir, keep_last_n_checkpoints=0)
 
-    if (
-        args.try_auto_save_to_beaker
-        and accelerator.is_main_process
-        and is_beaker_job()
-        and len(maybe_get_beaker_config().beaker_dataset_id_urls) > 0
-        and args.output_dir.rstrip("/") != "/output"
-    ):
-        shutil.copytree(args.output_dir, "/output", dirs_exist_ok=True)
-
-    if is_beaker_job() and accelerator.is_main_process and args.try_launch_beaker_eval_jobs:
-        launch_ai2_evals_on_weka(
-            path=args.output_dir,
-            leaderboard_name=args.hf_repo_revision,
-            oe_eval_max_length=args.oe_eval_max_length,
-            wandb_url=wandb_tracker.run.url if wandb_tracker is not None else None,
-            oe_eval_tasks=args.oe_eval_tasks,
-        )
     if args.push_to_hub and accelerator.is_main_process:
         push_folder_to_hub(args.output_dir, args.hf_repo_id, args.hf_repo_revision)
     accelerator.wait_for_everyone()
