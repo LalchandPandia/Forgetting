@@ -19,56 +19,65 @@ echo "hostname $(hostname)"
 which python
 nvidia-smi
 
-cd /home/lalchand/Forgetting/eval_scripts
+cd /home/lalchand/Forgetting/open-instruct
 
 # ---- configure the job here ------------------------------------------------
-TASK="mmlu"                        # mmlu | ifeval
-STYLE="retaining_by_doing"         # mmlu:   retaining_by_doing | tulu_mc
-                                    # ifeval: retaining_by_doing | tulu
+# Runs all three tasks, both styles each (6 evals total, sequentially).
 MODEL_NAME_OR_PATH="/path/to/your/model"
-INPUT_JSONL="/path/to/your/input.jsonl"
 TENSOR_PARALLEL_SIZE=1
+OUTPUT_DIR="/net/scratch/lcpandia/eval_outputs"
+
+declare -A INPUT_JSONL=(
+    [mmlu]="/home/lcpandia/Forgetting/open-instruct/data/eval/mmlu.jsonl"
+    [ifeval]="/home/lcpandia/Forgetting/open-instruct/data/eval/ifeval.jsonl"
+    [gsm8k]="/net/scratch/lcpandia/data/processed/100_gsm8k_test.jsonl"
+)
+
+declare -A SCRIPT=(
+    [mmlu]="open_instruct/mmlu_eval.py"
+    [ifeval]="open_instruct/ifeval_eval.py"
+    [gsm8k]="open_instruct/gsm8k_eval.py"
+)
+
+declare -A STYLES=(
+    [mmlu]="retaining_by_doing tulu_mc"
+    [ifeval]="retaining_by_doing tulu"
+    [gsm8k]="retaining_by_doing tulu"
+)
 
 RETAINING_BY_DOING_PATH="/home/lalchand/Forgetting/retaining-by-doing"   # for ifeval --style retaining_by_doing
 OLMES_PATH="/home/lalchand/olmes"                                       # for ifeval --style tulu
-
-OUTPUT_DIR="/net/scratch/lcpandia/eval_outputs"
 # -----------------------------------------------------------------------------
 
 mkdir -p "${OUTPUT_DIR}"
 model_short=$(basename "${MODEL_NAME_OR_PATH}")
-OUTPUT_JSONL="${OUTPUT_DIR}/${TASK}_${STYLE}_${model_short}_${SLURM_JOB_ID}.jsonl"
 
-echo "TASK=${TASK}"
-echo "STYLE=${STYLE}"
-echo "MODEL_NAME_OR_PATH=${MODEL_NAME_OR_PATH}"
-echo "INPUT_JSONL=${INPUT_JSONL}"
-echo "OUTPUT_JSONL=${OUTPUT_JSONL}"
+for task in mmlu ifeval gsm8k; do
+    for style in ${STYLES[$task]}; do
+        output_jsonl="${OUTPUT_DIR}/${task}_${style}_${model_short}_${SLURM_JOB_ID}.jsonl"
 
-if [[ "${TASK}" == "mmlu" ]]; then
-    python mmlu_eval.py \
-        --input_jsonl "${INPUT_JSONL}" \
-        --style "${STYLE}" \
-        --model_name_or_path "${MODEL_NAME_OR_PATH}" \
-        --output_jsonl "${OUTPUT_JSONL}" \
-        --tensor_parallel_size "${TENSOR_PARALLEL_SIZE}"
+        extra_args=()
+        if [[ "${task}" == "ifeval" ]]; then
+            if [[ "${style}" == "retaining_by_doing" ]]; then
+                extra_args+=(--retaining_by_doing_path "${RETAINING_BY_DOING_PATH}")
+            else
+                extra_args+=(--olmes_path "${OLMES_PATH}")
+            fi
+        fi
 
-elif [[ "${TASK}" == "ifeval" ]]; then
-    extra_args=()
-    if [[ "${STYLE}" == "retaining_by_doing" ]]; then
-        extra_args+=(--retaining_by_doing_path "${RETAINING_BY_DOING_PATH}")
-    elif [[ "${STYLE}" == "tulu" ]]; then
-        extra_args+=(--olmes_path "${OLMES_PATH}")
-    fi
-    python ifeval_eval.py \
-        --input_jsonl "${INPUT_JSONL}" \
-        --style "${STYLE}" \
-        --model_name_or_path "${MODEL_NAME_OR_PATH}" \
-        --output_jsonl "${OUTPUT_JSONL}" \
-        --tensor_parallel_size "${TENSOR_PARALLEL_SIZE}" \
-        "${extra_args[@]}"
+        echo "=========================================="
+        echo "TASK=${task} STYLE=${style}"
+        echo "SCRIPT=${SCRIPT[$task]}"
+        echo "INPUT_JSONL=${INPUT_JSONL[$task]}"
+        echo "OUTPUT_JSONL=${output_jsonl}"
+        echo "=========================================="
 
-else
-    echo "Unknown TASK=${TASK} (expected mmlu or ifeval)"
-    exit 1
-fi
+        python "${SCRIPT[$task]}" \
+            --input_jsonl "${INPUT_JSONL[$task]}" \
+            --style "${style}" \
+            --model_name_or_path "${MODEL_NAME_OR_PATH}" \
+            --output_jsonl "${output_jsonl}" \
+            --tensor_parallel_size "${TENSOR_PARALLEL_SIZE}" \
+            "${extra_args[@]}"
+    done
+done
