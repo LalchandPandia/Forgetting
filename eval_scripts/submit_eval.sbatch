@@ -19,7 +19,7 @@ echo "hostname $(hostname)"
 which python
 nvidia-smi
 
-cd /home/lalchand/Forgetting/open-instruct
+cd /home/lcpandia/Forgetting/open-instruct
 
 # ---- configure the job here ------------------------------------------------
 # Runs all three tasks, both styles each (6 evals total, sequentially).
@@ -32,6 +32,10 @@ declare -A INPUT_JSONL=(
     [ifeval]="/home/lcpandia/Forgetting/open-instruct/data/eval/ifeval.jsonl"
     [gsm8k]="/net/scratch/lcpandia/data/processed/100_gsm8k_test.jsonl"
 )
+# ifeval --style tulu needs the official HuggingFaceH4/ifeval schema
+# (prompt/instruction_id_list/kwargs), not the messages/ground_truth schema
+# used by --style retaining_by_doing above.
+IFEVAL_TULU_INPUT_JSONL="/home/lcpandia/Forgetting/open-instruct/data/eval/ifeval_official.jsonl"
 
 declare -A SCRIPT=(
     [mmlu]="open_instruct/mmlu_eval.py"
@@ -45,8 +49,8 @@ declare -A STYLES=(
     [gsm8k]="retaining_by_doing tulu"
 )
 
-RETAINING_BY_DOING_PATH="/home/lalchand/Forgetting/retaining-by-doing"   # for ifeval --style retaining_by_doing
-OLMES_PATH="/home/lalchand/olmes"                                       # for ifeval --style tulu
+RETAINING_BY_DOING_PATH="/home/lcpandia/Forgetting/retaining-by-doing"   # for ifeval --style retaining_by_doing
+OLMES_PATH="/home/lcpandia/olmes"                                       # for ifeval --style tulu
 # -----------------------------------------------------------------------------
 
 mkdir -p "${OUTPUT_DIR}"
@@ -56,24 +60,26 @@ for task in mmlu ifeval gsm8k; do
     for style in ${STYLES[$task]}; do
         output_jsonl="${OUTPUT_DIR}/${task}_${style}_${model_short}_${SLURM_JOB_ID}.jsonl"
 
+        input_jsonl="${INPUT_JSONL[$task]}"
         extra_args=()
         if [[ "${task}" == "ifeval" ]]; then
             if [[ "${style}" == "retaining_by_doing" ]]; then
                 extra_args+=(--retaining_by_doing_path "${RETAINING_BY_DOING_PATH}")
             else
                 extra_args+=(--olmes_path "${OLMES_PATH}")
+                input_jsonl="${IFEVAL_TULU_INPUT_JSONL}"
             fi
         fi
 
         echo "=========================================="
         echo "TASK=${task} STYLE=${style}"
         echo "SCRIPT=${SCRIPT[$task]}"
-        echo "INPUT_JSONL=${INPUT_JSONL[$task]}"
+        echo "INPUT_JSONL=${input_jsonl}"
         echo "OUTPUT_JSONL=${output_jsonl}"
         echo "=========================================="
 
         python "${SCRIPT[$task]}" \
-            --input_jsonl "${INPUT_JSONL[$task]}" \
+            --input_jsonl "${input_jsonl}" \
             --style "${style}" \
             --model_name_or_path "${MODEL_NAME_OR_PATH}" \
             --output_jsonl "${output_jsonl}" \
