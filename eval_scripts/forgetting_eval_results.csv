@@ -1,0 +1,37 @@
+checkpoint,task,style,metric,value,job_id
+Qwen2.5-1.5B-Instruct (base),mmlu,retaining_by_doing,accuracy,0.5495,1370916
+Qwen2.5-1.5B-Instruct (base),mmlu,tulu_mc,accuracy,0.5720,1370916
+Qwen2.5-1.5B-Instruct (base),ifeval,retaining_by_doing,accuracy,0.2676,1370916
+Qwen2.5-1.5B-Instruct (base),ifeval,tulu,prompt_level_strict_acc,0.4011,1370916
+Qwen2.5-1.5B-Instruct (base),ifeval,tulu,prompt_level_loose_acc,0.4473,1370916
+Qwen2.5-1.5B-Instruct (base),ifeval,tulu,inst_level_strict_acc,0.5120,1370916
+Qwen2.5-1.5B-Instruct (base),ifeval,tulu,inst_level_loose_acc,0.5540,1370916
+Qwen2.5-1.5B-Instruct (base),gsm8k,retaining_by_doing,accuracy,0.6748,1370916
+Qwen2.5-1.5B-Instruct (base),gsm8k,tulu,accuracy,0.6598,1370916
+mmlu_ifeval_tuned_1.5B_full,mmlu,retaining_by_doing,accuracy,0.5490,1370856
+mmlu_ifeval_tuned_1.5B_full,mmlu,tulu_mc,accuracy,0.5805,1370856
+mmlu_ifeval_tuned_1.5B_full,ifeval,retaining_by_doing,accuracy,0.3644,1370856
+mmlu_ifeval_tuned_1.5B_full,ifeval,tulu,prompt_level_strict_acc,0.4030,1370856
+mmlu_ifeval_tuned_1.5B_full,ifeval,tulu,prompt_level_loose_acc,0.4399,1370856
+mmlu_ifeval_tuned_1.5B_full,ifeval,tulu,inst_level_strict_acc,0.5180,1370856
+mmlu_ifeval_tuned_1.5B_full,ifeval,tulu,inst_level_loose_acc,0.5504,1370856
+mmlu_ifeval_tuned_1.5B_full,gsm8k,retaining_by_doing,accuracy,0.6353,1370856
+mmlu_ifeval_tuned_1.5B_full,gsm8k,tulu,accuracy,0.6735,1370856
+ifeval_base_1.5B_full,mmlu,retaining_by_doing,accuracy,0.5568,1370855
+ifeval_base_1.5B_full,mmlu,tulu_mc,accuracy,0.5618,1370855
+ifeval_base_1.5B_full,ifeval,retaining_by_doing,accuracy,0.5484,1370855
+ifeval_base_1.5B_full,ifeval,tulu,prompt_level_strict_acc,0.5287,1370855
+ifeval_base_1.5B_full,ifeval,tulu,prompt_level_loose_acc,0.5693,1370855
+ifeval_base_1.5B_full,ifeval,tulu,inst_level_strict_acc,0.6487,1370855
+ifeval_base_1.5B_full,ifeval,tulu,inst_level_loose_acc,0.6787,1370855
+ifeval_base_1.5B_full,gsm8k,retaining_by_doing,accuracy,0.6331,1370855
+ifeval_base_1.5B_full,gsm8k,tulu,accuracy,0.6613,1370855
+gsm8k_mmlu_ifeval_tuned_1.5B_full,mmlu,retaining_by_doing,accuracy,0.0583,1370857
+gsm8k_mmlu_ifeval_tuned_1.5B_full,mmlu,tulu_mc,accuracy,0.5783,1370857
+gsm8k_mmlu_ifeval_tuned_1.5B_full,ifeval,retaining_by_doing,accuracy,0.2641,1370857
+gsm8k_mmlu_ifeval_tuned_1.5B_full,ifeval,tulu,prompt_level_strict_acc,0.2736,1370857
+gsm8k_mmlu_ifeval_tuned_1.5B_full,ifeval,tulu,prompt_level_loose_acc,0.2994,1370857
+gsm8k_mmlu_ifeval_tuned_1.5B_full,ifeval,tulu,inst_level_strict_acc,0.4101,1370857
+gsm8k_mmlu_ifeval_tuned_1.5B_full,ifeval,tulu,inst_level_loose_acc,0.4424,1370857
+gsm8k_mmlu_ifeval_tuned_1.5B_full,gsm8k,retaining_by_doing,accuracy,0.5967,1370857
+gsm8k_mmlu_ifeval_tuned_1.5B_full,gsm8k,tulu,accuracy,0.5736,1370857
