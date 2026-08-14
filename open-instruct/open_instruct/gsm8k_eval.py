@@ -3,11 +3,20 @@ Evaluate a chat model on GSM8K via vLLM, reproducing two different eval
 methodologies from two different repos, both reading questions from a local
 jsonl file.
 
-Input jsonl format (one row per question), the standard GSM8K schema:
+Input jsonl format (one row per question) is either the standard GSM8K schema:
     {
         "question": "Natalia sold clips to 48 of her friends in April...",
         "answer": "Natalia sold 48/2 = <<48/2=24>>24 clips in May. ... #### 72"
     }
+or open-instruct's chat schema, as produced by data/processed/*.jsonl:
+    {
+        "messages": [
+            {"role": "user", "content": "Question: Natalia sold...\nAnswer: "},
+            {"role": "assistant", "content": "Natalia sold 48/2 = <<48/2=24>>24 clips in May. ... #### 72"}
+        ]
+    }
+(the Question:/Answer: wrapper on the user turn is stripped back out before use --
+see get_question()/get_gold_answer()).
 
 Styles
 ------
@@ -72,6 +81,26 @@ def write_jsonl(path, rows):
             f.write(json.dumps(row) + "\n")
 
 
+def get_question(row):
+    """Rows are either the flat {question, answer} GSM8K schema, or open-instruct's
+    {messages: [{role: user, content: "Question: ...\\nAnswer: "}, ...]} schema. For the
+    latter, strip the Question:/Answer: wrapper so callers get the bare question text
+    (retaining_by_doing feeds it straight into a chat template; tulu's make_query()
+    re-adds the same wrapper itself)."""
+    if "messages" in row:
+        content = row["messages"][0]["content"]
+        content = re.sub(r"^Question:\s*", "", content)
+        content = re.sub(r"\s*Answer:\s*$", "", content)
+        return content
+    return row["question"]
+
+
+def get_gold_answer(row):
+    if "messages" in row:
+        return row["messages"][1]["content"]
+    return row["answer"]
+
+
 def load_vllm(model_name_or_path, tensor_parallel_size=None):
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     if tokenizer.chat_template is None:
@@ -119,7 +148,7 @@ def run_retaining_by_doing(rows, llm, tokenizer, batch_size, max_new_tokens):
         batch = rows[start:start + batch_size]
         prompts = [
             tokenizer.apply_chat_template(
-                [{"role": "user", "content": row["question"]}],
+                [{"role": "user", "content": get_question(row)}],
                 tokenize=False,
                 add_generation_prompt=True,
             )
@@ -129,9 +158,9 @@ def run_retaining_by_doing(rows, llm, tokenizer, batch_size, max_new_tokens):
         for row, output in zip(batch, outputs):
             output_text = output.outputs[0].text
             pred = parse_retaining_by_doing_answer(output_text)
-            gold = parse_retaining_by_doing_answer(row["answer"])
+            gold = parse_retaining_by_doing_answer(get_gold_answer(row))
             predictions.append(dict(
-                question=row["question"],
+                question=get_question(row),
                 output_text=output_text,
                 pred=pred,
                 gold=gold,
@@ -194,14 +223,15 @@ def run_tulu(rows, llm, tokenizer, num_shots, fewshot_jsonl, max_new_tokens):
 
     messages = []
     for shot in shots:
-        short_answer = shot["answer"].split("####")[-1].strip()
-        messages.append({"role": "user", "content": make_query(shot["question"])})
-        messages.append({"role": "assistant", "content": normalize_cot_answer(shot["answer"], short_answer)})
+        shot_answer = get_gold_answer(shot)
+        short_answer = shot_answer.split("####")[-1].strip()
+        messages.append({"role": "user", "content": make_query(get_question(shot))})
+        messages.append({"role": "assistant", "content": normalize_cot_answer(shot_answer, short_answer)})
 
     eval_rows = [row for idx, row in enumerate(rows) if idx not in excluded_indices]
     prompts = []
     for row in eval_rows:
-        row_messages = messages + [{"role": "user", "content": make_query(row["question"])}]
+        row_messages = messages + [{"role": "user", "content": make_query(get_question(row))}]
         prompts.append(tokenizer.apply_chat_template(row_messages, tokenize=False, add_generation_prompt=True))
 
     sampling_params = SamplingParams(
@@ -215,11 +245,11 @@ def run_tulu(rows, llm, tokenizer, num_shots, fewshot_jsonl, max_new_tokens):
     for row, output in zip(eval_rows, outputs):
         output_text = output.outputs[0].text
         pred_raw = extract_last_number(output_text)
-        gold_raw = extract_last_number(row["answer"].split("####")[-1].strip())
+        gold_raw = extract_last_number(get_gold_answer(row).split("####")[-1].strip())
         pred = normalize_for_exact_match(pred_raw)
         gold = normalize_for_exact_match(gold_raw)
         predictions.append(dict(
-            question=row["question"],
+            question=get_question(row),
             output_text=output_text,
             pred=pred,
             gold=gold,
