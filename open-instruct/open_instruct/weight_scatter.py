@@ -15,11 +15,14 @@ Produces:
      Lets you see whether one stage moved specific tensors much more than the others.
   2. param_changes_<a>_to_<b>.csv -- every tensor's rel/abs change for that
      transition, sorted worst-first.
-  3. before_after_top_params_<a>_to_<b>.png -- for the top-K most-changed tensors
-     in the HIGHLIGHTED transition (--highlight, defaults to the last one in the
-     chain), a scatter of sampled (w_prev, w_curr) element pairs against the y=x
-     line -- shows whether the change is spread evenly across the tensor or
-     concentrated in a subset of weights.
+  3. before_after_top_params_<a>_to_<b>.png -- ONE of these per consecutive
+     transition in --chain (base->ifeval, ifeval->mmlu, mmlu->gsm8k, ...), each
+     showing the top-K most-changed tensors FOR THAT STAGE ONLY (its own before
+     vs. its own after -- never base vs. the final checkpoint). A scatter of
+     sampled (w_prev, w_curr) element pairs against the y=x line -- shows whether
+     the change is spread evenly across the tensor or concentrated in a subset
+     of weights. Use --highlight to restrict this to specific transitions instead
+     of all of them.
 
 Usage:
     python weight_scatter.py \
@@ -28,7 +31,6 @@ Usage:
         --ckpt mmlu=/net/scratch/lcpandia/forgetting/mmlu_ifeval_tuned_1.5B_full/finetune \
         --ckpt gsm8k=/net/scratch/lcpandia/forgetting/gsm8k_mmlu_ifeval_tuned_1.5B_full/finetune \
         --chain base,ifeval,mmlu,gsm8k \
-        --highlight mmlu,gsm8k \
         --out_dir plots/weight_scatter
 """
 import argparse
@@ -173,9 +175,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", action="append", required=True, help="name=path, repeatable")
     ap.add_argument("--chain", required=True, help="comma-separated ckpt names in fine-tuning order")
-    ap.add_argument("--highlight", default=None,
-                     help="comma-separated 'a,b' naming the transition to zoom into for the "
-                          "before/after scatter; defaults to the last transition in --chain")
+    ap.add_argument("--highlight", action="append", default=None,
+                     help="comma-separated 'a,b' naming a transition to zoom into for the "
+                          "before/after scatter; repeatable. Defaults to EVERY consecutive "
+                          "transition in --chain (i.e. one before/after plot per stage, not "
+                          "just base vs. the final checkpoint)")
     ap.add_argument("--topk", type=int, default=8, help="how many tensors to zoom into")
     ap.add_argument("--sample", type=int, default=20000, help="max elements sampled per tensor")
     ap.add_argument("--seed", type=int, default=0)
@@ -206,16 +210,18 @@ def main():
     plot_layer_scatter(transitions, key_order, os.path.join(args.out_dir, "layer_rel_change_by_stage.png"))
 
     if args.highlight:
-        a, b = [s.strip() for s in args.highlight.split(",")]
+        zoom_pairs = [tuple(s.strip() for s in h.split(",")) for h in args.highlight]
     else:
-        a, b = chain[-2], chain[-1]
-    label = f"{a}→{b}"
-    metrics = transitions[label]
-    top_params = sorted(metrics.items(), key=lambda kv: kv[1]["rel_change"], reverse=True)[: args.topk]
-    plot_before_after(
-        state_dicts[a], state_dicts[b], top_params, args.sample, args.seed,
-        os.path.join(args.out_dir, f"before_after_top_params_{a}_to_{b}.png"), label,
-    )
+        zoom_pairs = list(zip(chain[:-1], chain[1:]))  # every stage, not just the last
+
+    for a, b in zoom_pairs:
+        label = f"{a}→{b}"
+        metrics = transitions[label]
+        top_params = sorted(metrics.items(), key=lambda kv: kv[1]["rel_change"], reverse=True)[: args.topk]
+        plot_before_after(
+            state_dicts[a], state_dicts[b], top_params, args.sample, args.seed,
+            os.path.join(args.out_dir, f"before_after_top_params_{a}_to_{b}.png"), label,
+        )
 
 
 if __name__ == "__main__":

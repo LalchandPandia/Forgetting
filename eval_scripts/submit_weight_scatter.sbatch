@@ -29,7 +29,6 @@ python open_instruct/weight_scatter.py \
     --ckpt mmlu=/net/scratch/lcpandia/forgetting/mmlu_ifeval_tuned_1.5B_full/finetune \
     --ckpt gsm8k=/net/scratch/lcpandia/forgetting/gsm8k_mmlu_ifeval_tuned_1.5B_full/finetune \
     --chain base,ifeval,mmlu,gsm8k \
-    --highlight mmlu,gsm8k \
     --topk 8 \
     --sample 20000 \
     --out_dir "${OUT_DIR}"
