@@ -1,6 +1,7 @@
 """
 Evaluate a chat model on GSM8K via vLLM, reproducing two different eval
-methodologies from two different repos, both reading questions from a local
+methodologies from two different repos (plus a third, local style matching
+this project's own SFT prompt format), all reading questions from a local
 jsonl file.
 
 Input jsonl format (one row per question) is either the standard GSM8K schema:
@@ -29,6 +30,17 @@ Styles
     Zero-shot, free-form generation, answer extracted via a cascading regex
     (currency/boxed/inline-math/last-number fallbacks), then exact string
     match against the gold answer extracted the same way.
+
+--style train_format
+    Zero-shot, same free-form generation + cascading-regex scoring as
+    retaining_by_doing, but the user turn is passed through VERBATIM as
+    "Question: {q}\nAnswer: " -- the exact string this project's SFT data
+    uses (see scripts/data/gsm8k_official.py) -- instead of
+    retaining_by_doing's bare, unwrapped question text. Isolates whether a
+    train/eval prompt-format mismatch (retaining_by_doing's prompt does not
+    end in the "\nAnswer: " cue the model was fine-tuned to expect right
+    before generating) explains a gap between retaining_by_doing and tulu,
+    as opposed to an actual capability/reasoning difference.
 
 --style tulu
     Reproduces oe_eval's `gsm8k::tulu` task:
@@ -170,6 +182,47 @@ def run_retaining_by_doing(rows, llm, tokenizer, batch_size, max_new_tokens):
 
 
 # ---------------------------------------------------------------------------
+# Style 1b: train_format -- zero-shot, but the user turn is passed through
+# VERBATIM as "Question: {q}\nAnswer: " (the exact string open-instruct's SFT
+# data uses -- see scripts/data/gsm8k_official.py), instead of get_question()'s
+# stripped/bare question text. retaining_by_doing's prompt does NOT match what
+# the model was fine-tuned to see right before generating (no "Question:"/
+# "Answer:" framing, no trailing space); this style isolates that one variable
+# to test whether the format mismatch itself explains an accuracy gap, using
+# the same answer extraction/scoring as retaining_by_doing so it's otherwise
+# an apples-to-apples comparison.
+# ---------------------------------------------------------------------------
+
+def run_train_format(rows, llm, tokenizer, batch_size, max_new_tokens):
+    predictions = []
+    sampling_params = SamplingParams(max_tokens=max_new_tokens, temperature=0.0)
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start:start + batch_size]
+        prompts = [
+            tokenizer.apply_chat_template(
+                [row["messages"][0]] if "messages" in row
+                else [{"role": "user", "content": f"Question: {row['question']}\nAnswer: "}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for row in batch
+        ]
+        outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
+        for row, output in zip(batch, outputs):
+            output_text = output.outputs[0].text
+            pred = parse_retaining_by_doing_answer(output_text)
+            gold = parse_retaining_by_doing_answer(get_gold_answer(row))
+            predictions.append(dict(
+                question=get_question(row),
+                output_text=output_text,
+                pred=pred,
+                gold=gold,
+                correct=pred is not None and pred == gold,
+            ))
+    return predictions
+
+
+# ---------------------------------------------------------------------------
 # Style 2: oe_eval's gsm8k::tulu (8-shot CoT, fewshot_as_multiturn, exact match)
 # ---------------------------------------------------------------------------
 
@@ -267,14 +320,16 @@ def summarize(predictions):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_jsonl", required=True, help="GSM8K questions as jsonl.")
-    parser.add_argument("--style", required=True, choices=["retaining_by_doing", "tulu"])
+    parser.add_argument("--style", required=True, choices=["retaining_by_doing", "train_format", "tulu"])
     parser.add_argument("--model_name_or_path", required=True)
     parser.add_argument("--output_jsonl", required=True)
     parser.add_argument("--tensor_parallel_size", type=int, default=None, help="Defaults to all visible GPUs.")
-    parser.add_argument("--batch_size", type=int, default=64, help="Used by --style retaining_by_doing only.")
+    parser.add_argument(
+        "--batch_size", type=int, default=64, help="Used by --style retaining_by_doing/train_format only."
+    )
     parser.add_argument(
         "--max_new_tokens", type=int, default=None,
-        help="Defaults to 4096 for --style retaining_by_doing, 512 for --style tulu "
+        help="Defaults to 4096 for --style retaining_by_doing/train_format, 512 for --style tulu "
              "(matching each repo's own eval config).",
     )
     parser.add_argument("--num_shots", type=int, default=8, help="Used by --style tulu only.")
@@ -285,13 +340,15 @@ def main():
     )
     args = parser.parse_args()
 
-    max_new_tokens = args.max_new_tokens or (4096 if args.style == "retaining_by_doing" else 512)
+    max_new_tokens = args.max_new_tokens or (512 if args.style == "tulu" else 4096)
 
     rows = load_jsonl(args.input_jsonl)
     llm, tokenizer = load_vllm(args.model_name_or_path, args.tensor_parallel_size)
 
     if args.style == "retaining_by_doing":
         predictions = run_retaining_by_doing(rows, llm, tokenizer, args.batch_size, max_new_tokens)
+    elif args.style == "train_format":
+        predictions = run_train_format(rows, llm, tokenizer, args.batch_size, max_new_tokens)
     else:
         predictions = run_tulu(rows, llm, tokenizer, args.num_shots, args.fewshot_jsonl, max_new_tokens)
 
