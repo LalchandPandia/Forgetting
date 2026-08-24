@@ -93,6 +93,16 @@ def write_jsonl(path, rows):
             f.write(json.dumps(row) + "\n")
 
 
+def print_samples(prompts, outputs, n):
+    """Print the exact rendered prompt + raw generation for the first n
+    examples -- what the model actually saw and produced, not a
+    reconstruction. Call once, on the first batch only."""
+    for i in range(min(n, len(prompts))):
+        print(f"\n{'=' * 80}\n[sample {i}] PROMPT:\n{prompts[i]}")
+        print(f"\n[sample {i}] GENERATION:\n{outputs[i].outputs[0].text}")
+    print(f"{'=' * 80}\n" if n > 0 else "", end="")
+
+
 def get_question(row):
     """Rows are either the flat {question, answer} GSM8K schema, or open-instruct's
     {messages: [{role: user, content: "Question: ...\\nAnswer: "}, ...]} schema. For the
@@ -153,7 +163,7 @@ def parse_retaining_by_doing_answer(output_text):
     return None
 
 
-def run_retaining_by_doing(rows, llm, tokenizer, batch_size, max_new_tokens):
+def run_retaining_by_doing(rows, llm, tokenizer, batch_size, max_new_tokens, print_n=0):
     predictions = []
     sampling_params = SamplingParams(max_tokens=max_new_tokens, temperature=0.0)
     for start in range(0, len(rows), batch_size):
@@ -167,6 +177,8 @@ def run_retaining_by_doing(rows, llm, tokenizer, batch_size, max_new_tokens):
             for row in batch
         ]
         outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
+        if start == 0:
+            print_samples(prompts, outputs, print_n)
         for row, output in zip(batch, outputs):
             output_text = output.outputs[0].text
             pred = parse_retaining_by_doing_answer(output_text)
@@ -193,7 +205,7 @@ def run_retaining_by_doing(rows, llm, tokenizer, batch_size, max_new_tokens):
 # an apples-to-apples comparison.
 # ---------------------------------------------------------------------------
 
-def run_train_format(rows, llm, tokenizer, batch_size, max_new_tokens):
+def run_train_format(rows, llm, tokenizer, batch_size, max_new_tokens, print_n=0):
     predictions = []
     sampling_params = SamplingParams(max_tokens=max_new_tokens, temperature=0.0)
     for start in range(0, len(rows), batch_size):
@@ -208,6 +220,8 @@ def run_train_format(rows, llm, tokenizer, batch_size, max_new_tokens):
             for row in batch
         ]
         outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
+        if start == 0:
+            print_samples(prompts, outputs, print_n)
         for row, output in zip(batch, outputs):
             output_text = output.outputs[0].text
             pred = parse_retaining_by_doing_answer(output_text)
@@ -271,7 +285,7 @@ def normalize_for_exact_match(text):
     return text.strip().lower()
 
 
-def run_tulu(rows, llm, tokenizer, num_shots, fewshot_jsonl, max_new_tokens):
+def run_tulu(rows, llm, tokenizer, num_shots, fewshot_jsonl, max_new_tokens, print_n=0):
     shots, excluded_indices = build_fewshot_shots(fewshot_jsonl, rows, num_shots)
 
     messages = []
@@ -293,6 +307,7 @@ def run_tulu(rows, llm, tokenizer, num_shots, fewshot_jsonl, max_new_tokens):
         stop=["Question:", "</s>", "<|im_end|>"],
     )
     outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
+    print_samples(prompts, outputs, print_n)
 
     predictions = []
     for row, output in zip(eval_rows, outputs):
@@ -338,6 +353,10 @@ def main():
         help="Used by --style tulu only. Jsonl of {question,answer} for the 8-shot CoT context. "
              "If omitted, shots are borrowed from --input_jsonl itself.",
     )
+    parser.add_argument(
+        "--print_n", type=int, default=0,
+        help="Print the exact rendered prompt + raw generation for the first N examples to stdout.",
+    )
     args = parser.parse_args()
 
     max_new_tokens = args.max_new_tokens or (512 if args.style == "tulu" else 4096)
@@ -346,11 +365,13 @@ def main():
     llm, tokenizer = load_vllm(args.model_name_or_path, args.tensor_parallel_size)
 
     if args.style == "retaining_by_doing":
-        predictions = run_retaining_by_doing(rows, llm, tokenizer, args.batch_size, max_new_tokens)
+        predictions = run_retaining_by_doing(rows, llm, tokenizer, args.batch_size, max_new_tokens, args.print_n)
     elif args.style == "train_format":
-        predictions = run_train_format(rows, llm, tokenizer, args.batch_size, max_new_tokens)
+        predictions = run_train_format(rows, llm, tokenizer, args.batch_size, max_new_tokens, args.print_n)
     else:
-        predictions = run_tulu(rows, llm, tokenizer, args.num_shots, args.fewshot_jsonl, max_new_tokens)
+        predictions = run_tulu(
+            rows, llm, tokenizer, args.num_shots, args.fewshot_jsonl, max_new_tokens, args.print_n
+        )
 
     write_jsonl(args.output_jsonl, predictions)
     metrics = summarize(predictions)
