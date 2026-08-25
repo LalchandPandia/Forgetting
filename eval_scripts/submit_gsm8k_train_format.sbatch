@@ -21,10 +21,15 @@ nvidia-smi
 cd /home/lcpandia/Forgetting/open-instruct
 
 # ---- configure the job here ------------------------------------------------
-# Runs retaining_by_doing (mismatched prompt) side by side with train_format
-# (exact training-format prompt) across the full fine-tuning chain, on the
-# full 1,319-row official GSM8K test set -- so you can see, per checkpoint,
-# whether closing the prompt-format gap recovers accuracy.
+# Runs all four styles across the full fine-tuning chain, on the full
+# 1,319-row official GSM8K test set -- so you can see, per checkpoint:
+#   retaining_by_doing    zero-shot, prompt mismatched vs. training format
+#   train_format           zero-shot, prompt matches training format exactly
+#   train_format_fewshot  8-shot (real STD:GSM8k shots), "Answer:" on the
+#                          user side like training -- isolates shot-count
+#                          effects from tulu's "Answer:" placement
+#   tulu                   8-shot, oe_eval's real gsm8k::tulu convention
+#                          ("Answer:" as an assistant-side prefix)
 OUTPUT_DIR="/net/scratch/lcpandia/eval_outputs"
 INPUT_JSONL="data/eval/gsm8k_official_test.jsonl"
 
@@ -35,7 +40,7 @@ declare -A CKPTS=(
     [gsm8k]="/net/scratch/lcpandia/forgetting/gsm8k_mmlu_ifeval_tuned_1.5B_full/finetune"
 )
 CKPT_ORDER=(base ifeval mmlu gsm8k)
-STYLES=(retaining_by_doing train_format)
+STYLES=(retaining_by_doing train_format train_format_fewshot tulu)
 # -----------------------------------------------------------------------------
 
 mkdir -p "${OUTPUT_DIR}"
