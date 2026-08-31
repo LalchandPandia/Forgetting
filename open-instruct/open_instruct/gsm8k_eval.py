@@ -208,14 +208,14 @@ FEWSHOT_EXAMPLES = [
 BASE_STOP_SEQUENCES = ["Question:", "</s>", "<|im_end|>", "\n\n"]
 
 
-def build_base_fewshot_prefix():
-    parts = [f"Question: {ex['question']}\nAnswer: {ex['answer']}" for ex in FEWSHOT_EXAMPLES]
-    return "\n\n".join(parts) + "\n\n"
+def build_base_fewshot_prefix(num_shots=8):
+    parts = [f"Question: {ex['question']}\nAnswer: {ex['answer']}" for ex in FEWSHOT_EXAMPLES[:num_shots]]
+    return "\n\n".join(parts) + "\n\n" if parts else ""
 
 
-def run_base(rows, llm, tokenizer, batch_size, max_new_tokens, print_n=0):
+def run_base(rows, llm, tokenizer, batch_size, max_new_tokens, print_n=0, num_shots=8):
     predictions = []
-    fewshot_prefix = build_base_fewshot_prefix()
+    fewshot_prefix = build_base_fewshot_prefix(num_shots)
     sampling_params = SamplingParams(max_tokens=max_new_tokens, temperature=0.0, stop=BASE_STOP_SEQUENCES)
     for start in range(0, len(rows), batch_size):
         batch = rows[start:start + batch_size]
@@ -495,7 +495,7 @@ def main():
              "base/tulu/train_format_fewshot (matching each repo's own eval config).",
     )
     parser.add_argument(
-        "--num_shots", type=int, default=8, help="Used by --style tulu/train_format_fewshot only."
+        "--num_shots", type=int, default=8, help="Used by --style base/tulu/train_format_fewshot only."
     )
     parser.add_argument(
         "--fewshot_jsonl", default=None,
@@ -518,7 +518,9 @@ def main():
     )
 
     if args.style == "base":
-        predictions = run_base(rows, llm, tokenizer, args.batch_size, max_new_tokens, args.print_n)
+        predictions = run_base(
+            rows, llm, tokenizer, args.batch_size, max_new_tokens, args.print_n, args.num_shots
+        )
     elif args.style == "retaining_by_doing":
         predictions = run_retaining_by_doing(rows, llm, tokenizer, args.batch_size, max_new_tokens, args.print_n)
     elif args.style == "train_format":
