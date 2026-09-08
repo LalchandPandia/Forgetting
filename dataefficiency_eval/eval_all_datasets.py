@@ -76,7 +76,13 @@ from utils.calculate_eval_metrics import (  # noqa: E402
     calculate_str_contains,
 )
 
-MODEL_CLASSES = {"llama": Llama, "mistral": Mistral, "qwen": Qwen}
+# Not part of dataefficiency/scripts/ (unlike the three above) - lives
+# alongside this script instead, since it's specific to this eval tool. See
+# olmo_child.py for why it can't just hardcode eos_token/pad_token like the
+# other families do.
+from olmo_child import Olmo  # noqa: E402
+
+MODEL_CLASSES = {"llama": Llama, "mistral": Mistral, "qwen": Qwen, "olmo": Olmo}
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +273,13 @@ def evaluate_one_task(model, tokenizer, model_prefix, model_name, task, args, de
     target_key = prompt['assistant_output']
     answer_len = prompt['answer_len']
     assistant_start_token = model_cls.assistant_start_token
-    eos_token = model_cls.eos_token
+    # Read off the already-loaded tokenizer rather than trusting this fresh
+    # per-task model_cls instance's own eos_token attribute: for Olmo that
+    # attribute is only populated inside get_model_and_tokenizer(), which
+    # isn't called on this instance (the model/tokenizer are loaded once in
+    # main() and reused across tasks). The tokenizer is the authoritative
+    # source for every family anyway.
+    eos_token = tokenizer.eos_token
 
     data = model_cls.get_data(tokenizer=tokenizer, max_seq_len=args.max_seq_len, filter_long_seq=False)
 
@@ -311,7 +323,7 @@ def get_model_family(model_name, override=None):
     if override:
         return override
     lname = model_name.lower()
-    for family in ("llama", "mistral", "qwen"):
+    for family in ("llama", "mistral", "qwen", "olmo"):
         if family in lname:
             return family
     return None
@@ -358,7 +370,7 @@ def main():
     if model_prefix is None:
         parser.error(
             f"Could not infer model family from --model_name={args.model_name!r}; "
-            "pass --model_family {llama,mistral,qwen} explicitly."
+            "pass --model_family {llama,mistral,qwen,olmo} explicitly."
         )
 
     selected_tasks = ALL_TASKS

@@ -26,7 +26,7 @@ cd /home/lcpandia/Forgetting/dataefficiency_eval
 # ---- configure the job here ------------------------------------------------
 MODEL_NAME="/path/to/your/model"
 MODEL_FAMILY=""          # override if the checkpoint path doesn't contain
-                          # "llama"/"mistral"/"qwen", e.g. MODEL_FAMILY="llama"
+                          # "llama"/"mistral"/"qwen"/"olmo", e.g. MODEL_FAMILY="olmo"
 TASKS=""                 # comma-separated task names to restrict to, e.g.
                           # TASKS="anli,mmlu,boolq" -- empty runs all 40
 BATCH_SIZE=8

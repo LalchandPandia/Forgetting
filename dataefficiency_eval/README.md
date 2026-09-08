@@ -8,6 +8,12 @@ It reuses `dataefficiency`'s model-family classes, prompt templates
 (`prompts/prompts_by_task_modified.yaml`), and metric functions directly (as a
 library, via `sys.path`) rather than duplicating or modifying them.
 
+Supported model families: `llama`, `mistral`, `qwen` (from `dataefficiency/scripts/`),
+and `olmo` (`olmo_child.py`, next to this script - OLMo-2-Instruct models
+trained with the Tulu chat template). Family is auto-detected from
+`--model_name` (matches "llama"/"mistral"/"qwen"/"olmo" as a substring) or set
+explicitly via `--model_family`.
+
 ## Task catalog (40 tasks)
 
 - 30 "core" tasks previously evaluated on Llama, Mistral, and Qwen.
@@ -38,7 +44,7 @@ Useful flags:
 
 - `--tasks anli,mmlu,boolq` - restrict to a subset of tasks (comma-separated
   names from `--list_tasks`).
-- `--model_family {llama,mistral,qwen}` - override family auto-detection,
+- `--model_family {llama,mistral,qwen,olmo}` - override family auto-detection,
   needed if your checkpoint path/name doesn't contain the family name.
 - `--calculate_all_metrics` - also compute BLEU/ROUGE/sequence-accuracy/F1 in
   addition to exact-string-match (slower).
