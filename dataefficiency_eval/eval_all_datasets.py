@@ -283,7 +283,7 @@ def evaluate_one_task(model, tokenizer, model_prefix, model_name, task, args, de
 
     data = model_cls.get_data(tokenizer=tokenizer, max_seq_len=args.max_seq_len, filter_long_seq=False)
 
-    if data[args.split].num_rows > args.max_test_examples:
+    if args.max_test_examples is not None and data[args.split].num_rows > args.max_test_examples:
         data[args.split] = data[args.split].shuffle(seed=args.seed).select(range(args.max_test_examples))
 
     mycollator = model_cls.get_datacollator(tokenizer=tokenizer, completion_only=True)
@@ -342,7 +342,11 @@ def main():
     parser.add_argument('--split', type=str, default='test')
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--max_seq_len', type=int, default=2048)
-    parser.add_argument('--max_test_examples', type=int, default=5000)
+    parser.add_argument('--max_test_examples', type=int, default=None,
+                         help='Cap the test split at this many (seeded-shuffled) examples per task. '
+                              'Default: None, i.e. evaluate the entire test split for every task '
+                              '(the largest tasks - mmlu, mnli, qqp, qnli, etc. - have tens of '
+                              'thousands of examples, so this is slower than the old 5000-example cap).')
     parser.add_argument('--seed', type=int, default=123)
     parser.add_argument('--use_quantized', action='store_true')
     parser.add_argument('--use_flash_attention', action='store_true')
@@ -416,6 +420,9 @@ def main():
         use_safetensors=args.use_safetensor,
     )
     tokenizer.padding_side = 'left'
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        print(f"Tokenizer had no pad_token; set pad_token = eos_token ({tokenizer.eos_token!r})")
     model.eval()
     model.to(device)
     print(f"Model loaded on device(s): {set(p.device for p in model.parameters())}")
