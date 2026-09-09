@@ -79,10 +79,29 @@ def resolve_split_names(entry, available_splits):
     return train_name, test_name, used_fallback
 
 
-def load_split_for_config(dataset_name, config_name, entry, trust_remote_code):
+def safe_load_dataset(dataset_name, config_name, allow_remote_code):
+    """Load a dataset, only reaching for trust_remote_code if actually needed.
+
+    Newer versions of `datasets` reject `trust_remote_code=True` outright for
+    datasets that are plain data files (no loading script) with an error
+    telling you to remove the argument. So we try without it first, and only
+    retry with it if the first attempt fails *and* the failure looks like it
+    actually needs remote code.
+    """
+
+    try:
+        return load_dataset(dataset_name, config_name)
+    except Exception as e:
+        needs_remote_code = "trust_remote_code" in str(e) or "custom code" in str(e)
+        if allow_remote_code and needs_remote_code:
+            return load_dataset(dataset_name, config_name, trust_remote_code=True)
+        raise
+
+
+def load_split_for_config(dataset_name, config_name, entry, allow_remote_code):
     """Load a dataset (optionally for one config/subset) and resolve its train/test splits."""
 
-    ds = load_dataset(dataset_name, config_name, trust_remote_code=trust_remote_code)
+    ds = safe_load_dataset(dataset_name, config_name, allow_remote_code)
     available_splits = list(ds.keys())
 
     train_name, test_name, used_fallback = resolve_split_names(entry, available_splits)
@@ -187,7 +206,7 @@ def write_jsonl(dataset, path):
     dataset.to_json(path, orient="records", lines=True)
 
 
-def process_entry(dataset_name, task_name, entry, output_dir, trust_remote_code, include_instruction, log):
+def process_entry(dataset_name, task_name, entry, output_dir, allow_remote_code, include_instruction, log):
     subset = entry.get("subset")
     subsets = subset.split() if subset else [task_name]
 
@@ -198,7 +217,7 @@ def process_entry(dataset_name, task_name, entry, output_dir, trust_remote_code,
     for sub in subsets:
         try:
             train_split, test_split, fallback, available = load_split_for_config(
-                dataset_name, sub, entry, trust_remote_code
+                dataset_name, sub, entry, allow_remote_code
             )
         except Exception:
             log(f"[ERROR] {dataset_name} / {sub}: failed to load\n{traceback.format_exc()}")
@@ -227,28 +246,37 @@ def process_entry(dataset_name, task_name, entry, output_dir, trust_remote_code,
     train_path, test_path = output_paths(output_dir, dataset_name, task_name)
     dataset_field = short_dataset_id(dataset_name)
 
-    if train_parts:
-        train_ds = train_parts[0] if len(train_parts) == 1 else concatenate_datasets(train_parts)
-        train_ds = to_sft_schema(train_ds, entry, dataset_field, include_instruction)
-        write_jsonl(train_ds, train_path)
-        log(f"[OK] {dataset_name} / {task_name}: wrote {train_path} ({train_ds.num_rows} rows)")
+    try:
+        if train_parts:
+            train_ds = train_parts[0] if len(train_parts) == 1 else concatenate_datasets(train_parts)
+            train_ds = to_sft_schema(train_ds, entry, dataset_field, include_instruction)
+            write_jsonl(train_ds, train_path)
+            log(f"[OK] {dataset_name} / {task_name}: wrote {train_path} ({train_ds.num_rows} rows)")
 
-    if test_parts:
-        test_ds = test_parts[0] if len(test_parts) == 1 else concatenate_datasets(test_parts)
-        test_ds = to_sft_schema(test_ds, entry, dataset_field, include_instruction)
-        write_jsonl(test_ds, test_path)
-        tag = " [from validation]" if used_fallback else ""
-        log(f"[OK] {dataset_name} / {task_name}: wrote {test_path}{tag} ({test_ds.num_rows} rows)")
+        if test_parts:
+            test_ds = test_parts[0] if len(test_parts) == 1 else concatenate_datasets(test_parts)
+            test_ds = to_sft_schema(test_ds, entry, dataset_field, include_instruction)
+            write_jsonl(test_ds, test_path)
+            tag = " [from validation]" if used_fallback else ""
+            log(f"[OK] {dataset_name} / {task_name}: wrote {test_path}{tag} ({test_ds.num_rows} rows)")
+    except Exception:
+        log(f"[ERROR] {dataset_name} / {task_name}: failed to build/write SFT rows\n{traceback.format_exc()}")
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_YAML_PATH = os.path.join(
+    SCRIPT_DIR, "..", "dataefficiency", "prompts", "prompts_by_task_modified.yaml"
+)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Export official HF train/test splits to JSONL")
-    parser.add_argument("--yaml_path", type=str,
-                         default="../dataefficiency/prompts/prompts_by_task_modified.yaml")
+    parser.add_argument("--yaml_path", type=str, default=DEFAULT_YAML_PATH)
     parser.add_argument("--output_dir", type=str, default="/net/spaces/scratch/lcpandia/data/processed")
     parser.add_argument("--only", type=str, nargs="*", default=None,
                          help="restrict to these top-level dataset names")
-    parser.add_argument("--no_trust_remote_code", action="store_true")
+    parser.add_argument("--no_trust_remote_code", action="store_true",
+                         help="never fall back to trust_remote_code=True, even if a dataset seems to need it")
     parser.add_argument("--no_instruction_prefix", action="store_true",
                          help="omit the task instruction from the user turn, keeping only the raw question")
     args = parser.parse_args()
@@ -273,7 +301,7 @@ def main():
                 task_name=task_name if task_name is not None else "default",
                 entry=entry,
                 output_dir=args.output_dir,
-                trust_remote_code=not args.no_trust_remote_code,
+                allow_remote_code=not args.no_trust_remote_code,
                 include_instruction=not args.no_instruction_prefix,
                 log=log,
             )
