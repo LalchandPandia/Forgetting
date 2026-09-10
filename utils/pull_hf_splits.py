@@ -79,29 +79,57 @@ def resolve_split_names(entry, available_splits):
     return train_name, test_name, used_fallback
 
 
-def safe_load_dataset(dataset_name, config_name, allow_remote_code):
-    """Load a dataset, only reaching for trust_remote_code if actually needed.
+def safe_load_dataset(dataset_name, config_name, entry, allow_remote_code):
+    """Load a dataset, working around two version-dependent `datasets` quirks.
 
-    Newer versions of `datasets` reject `trust_remote_code=True` outright for
-    datasets that are plain data files (no loading script) with an error
-    telling you to remove the argument. So we try without it first, and only
-    retry with it if the first attempt fails *and* the failure looks like it
-    actually needs remote code.
+    1. Newer `datasets` versions reject `trust_remote_code=True` outright for
+       plain data-file datasets (no loading script), with an error telling
+       you to remove the argument. So we try without it first, and only
+       retry with it if the failure looks like it actually needs remote code.
+    2. Some hub datasets still ship a legacy Python loading script. Recent
+       `datasets` versions refuse to run *any* loading script at all (even
+       with trust_remote_code) and raise "Dataset scripts are no longer
+       supported". The Hub auto-converts such datasets to a script-free
+       Parquet mirror on the `refs/convert/parquet` ref, so we retry there
+       -- but ONLY if that mirror actually has the split name(s) this entry
+       declares. The auto-conversion sometimes collapses many custom splits
+       (e.g. "train_coling2022", "train_2020", "train_random", ...) down to
+       a single generic "train"/"validation"/"test", which would silently
+       hand back the wrong data for datasets whose entry.split names a
+       specific variant. If the declared splits aren't there, we raise
+       loudly instead of guessing.
     """
 
     try:
         return load_dataset(dataset_name, config_name)
     except Exception as e:
-        needs_remote_code = "trust_remote_code" in str(e) or "custom code" in str(e)
+        msg = str(e)
+
+        if "Dataset scripts are no longer supported" in msg:
+            fallback_ds = load_dataset(dataset_name, config_name, revision="refs/convert/parquet")
+            declared_splits = list((entry.get("split") or {}).values())
+            missing = [s for s in declared_splits if s not in fallback_ds]
+            if missing:
+                raise RuntimeError(
+                    f"{dataset_name} (config={config_name}) needs a loading script that `datasets` "
+                    f"no longer runs, and its auto-converted Parquet mirror (refs/convert/parquet) "
+                    f"doesn't have the declared split(s) {missing} -- it only has "
+                    f"{list(fallback_ds.keys())}. This dataset needs a manual, dataset-specific fix "
+                    f"(e.g. reading the right raw files directly), not a generic fallback."
+                ) from e
+            return fallback_ds
+
+        needs_remote_code = "trust_remote_code" in msg or "custom code" in msg
         if allow_remote_code and needs_remote_code:
             return load_dataset(dataset_name, config_name, trust_remote_code=True)
+
         raise
 
 
 def load_split_for_config(dataset_name, config_name, entry, allow_remote_code):
     """Load a dataset (optionally for one config/subset) and resolve its train/test splits."""
 
-    ds = safe_load_dataset(dataset_name, config_name, allow_remote_code)
+    ds = safe_load_dataset(dataset_name, config_name, entry, allow_remote_code)
     available_splits = list(ds.keys())
 
     train_name, test_name, used_fallback = resolve_split_names(entry, available_splits)
@@ -207,6 +235,13 @@ def write_jsonl(dataset, path):
 
 
 def process_entry(dataset_name, task_name, entry, output_dir, allow_remote_code, include_instruction, log):
+    """`task_name` is the raw yaml key, which is None when the dataset has a single
+    (default) config -- that None must reach `load_dataset()` as-is (omitting the
+    config argument), so it is kept separate from `display_task`, the "default"
+    placeholder used only for log messages and output file naming.
+    """
+
+    display_task = task_name if task_name is not None else "default"
     subset = entry.get("subset")
     subsets = subset.split() if subset else [task_name]
 
@@ -220,7 +255,7 @@ def process_entry(dataset_name, task_name, entry, output_dir, allow_remote_code,
                 dataset_name, sub, entry, allow_remote_code
             )
         except Exception:
-            log(f"[ERROR] {dataset_name} / {sub}: failed to load\n{traceback.format_exc()}")
+            log(f"[ERROR] {dataset_name} / {display_task}: failed to load\n{traceback.format_exc()}")
             continue
 
         any_split_seen = True
@@ -231,19 +266,19 @@ def process_entry(dataset_name, task_name, entry, output_dir, allow_remote_code,
                 train_split = train_split.add_column("category", [sub] * len(train_split))
             train_parts.append(train_split)
         else:
-            log(f"[WARN] {dataset_name} / {sub}: no train split found (available: {available})")
+            log(f"[WARN] {dataset_name} / {display_task}: no train split found (available: {available})")
 
         if test_split is not None:
             if subset:
                 test_split = test_split.add_column("category", [sub] * len(test_split))
             test_parts.append(test_split)
         else:
-            log(f"[WARN] {dataset_name} / {sub}: no test or validation split found (available: {available})")
+            log(f"[WARN] {dataset_name} / {display_task}: no test or validation split found (available: {available})")
 
     if not any_split_seen:
         return
 
-    train_path, test_path = output_paths(output_dir, dataset_name, task_name)
+    train_path, test_path = output_paths(output_dir, dataset_name, display_task)
     dataset_field = short_dataset_id(dataset_name)
 
     try:
@@ -251,16 +286,16 @@ def process_entry(dataset_name, task_name, entry, output_dir, allow_remote_code,
             train_ds = train_parts[0] if len(train_parts) == 1 else concatenate_datasets(train_parts)
             train_ds = to_sft_schema(train_ds, entry, dataset_field, include_instruction)
             write_jsonl(train_ds, train_path)
-            log(f"[OK] {dataset_name} / {task_name}: wrote {train_path} ({train_ds.num_rows} rows)")
+            log(f"[OK] {dataset_name} / {display_task}: wrote {train_path} ({train_ds.num_rows} rows)")
 
         if test_parts:
             test_ds = test_parts[0] if len(test_parts) == 1 else concatenate_datasets(test_parts)
             test_ds = to_sft_schema(test_ds, entry, dataset_field, include_instruction)
             write_jsonl(test_ds, test_path)
             tag = " [from validation]" if used_fallback else ""
-            log(f"[OK] {dataset_name} / {task_name}: wrote {test_path}{tag} ({test_ds.num_rows} rows)")
+            log(f"[OK] {dataset_name} / {display_task}: wrote {test_path}{tag} ({test_ds.num_rows} rows)")
     except Exception:
-        log(f"[ERROR] {dataset_name} / {task_name}: failed to build/write SFT rows\n{traceback.format_exc()}")
+        log(f"[ERROR] {dataset_name} / {display_task}: failed to build/write SFT rows\n{traceback.format_exc()}")
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -298,7 +333,7 @@ def main():
         for task_name, entry in tasks.items():
             process_entry(
                 dataset_name=dataset_name,
-                task_name=task_name if task_name is not None else "default",
+                task_name=task_name,
                 entry=entry,
                 output_dir=args.output_dir,
                 allow_remote_code=not args.no_trust_remote_code,
