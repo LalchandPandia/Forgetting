@@ -95,6 +95,16 @@ def load_rows(path):
     return rows
 
 
+def print_samples(prompts, outputs, n):
+    """Print the exact rendered prompt + raw generation for the first n
+    examples -- what the model actually saw and produced, not a
+    reconstruction. Mirrors gsm8k_eval.py's helper of the same name."""
+    for i in range(min(n, len(prompts))):
+        print(f"\n{'=' * 80}\n[sample {i}] PROMPT:\n{prompts[i]}")
+        print(f"\n[sample {i}] GENERATION:\n{outputs[i].outputs[0].text}")
+    print(f"{'=' * 80}\n" if n > 0 else "", end="")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -106,6 +116,8 @@ def main():
                     help="accept a label as the first token of a longer completion")
     ap.add_argument("--max-new-tokens", type=int, default=8)
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--print_n", type=int, default=0,
+                    help="print the exact rendered prompt + raw generation for the first N examples")
     ap.add_argument("--out", default="anli_eval.json")
     args = ap.parse_args()
 
@@ -139,6 +151,7 @@ def main():
         stop=["\n", "Question:", "Premise:"],
     )
     outs = llm.generate(prompts, sp)
+    print_samples(prompts, outs, args.print_n)
 
     strict = not args.lenient
     n_correct = n_valid = 0
