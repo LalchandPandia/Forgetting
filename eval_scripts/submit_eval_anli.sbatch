@@ -59,6 +59,7 @@ python eval_anli.py \
     --model "${MODEL}" \
     --data "${DATA}" \
     --max-new-tokens "${MAX_NEW_TOKENS}" \
+    --print_n 3 \
     --out "${output_json}" \
     "${extra_args[@]}"
 
