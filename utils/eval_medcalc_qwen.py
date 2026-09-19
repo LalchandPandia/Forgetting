@@ -118,6 +118,17 @@ def load_local_jsonl(path):
     return rows
 
 
+def print_samples(prompts, outputs, n):
+    """Print the exact rendered prompt + raw generation for the first n
+    examples -- what the model actually saw and produced, not a
+    reconstruction. Mirrors gsm8k_eval.py's / eval_anli.py's helper of the
+    same name."""
+    for i in range(min(n, len(prompts))):
+        print(f"\n{'=' * 80}\n[sample {i}] PROMPT:\n{prompts[i]}")
+        print(f"\n[sample {i}] GENERATION:\n{outputs[i].outputs[0].text}")
+    print(f"{'=' * 80}\n" if n > 0 else "", end="")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
@@ -128,6 +139,8 @@ def main():
     ap.add_argument("--split", default="test")
     ap.add_argument("--max-new-tokens", type=int, default=2048)
     ap.add_argument("--limit", type=int, default=None, help="debug: first N instances")
+    ap.add_argument("--print_n", type=int, default=0,
+                     help="print the exact rendered prompt + raw generation for the first N examples")
     ap.add_argument("--out", default="medcalc_init.json")
     args = ap.parse_args()
 
@@ -160,6 +173,7 @@ def main():
         include_stop_str_in_output=True,
     )
     outputs = llm.generate(prompts, sp)
+    print_samples(prompts, outputs, args.print_n)
 
     # Grade.
     n_correct = n_parsed = 0
