@@ -47,6 +47,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, BitsAndBytesConfig, D
 from transformers.training_args import _convert_str_dict
 
 from open_instruct import logger_utils, model_utils, utils
+from open_instruct.attn_logit_monitor import AttentionLogitMonitor
 from open_instruct.dataset_transformation import (
     INPUT_IDS_KEY,
     TOKENIZED_SFT_DATASET_KEYS,
@@ -312,6 +313,13 @@ class FlatArguments:
         default=1,
         metadata={
             "help": "Degree of Ulysses sequence parallelism. 1 means disabled. Requires DeepSpeed ZeRO-3 and flash attention."
+        },
+    )
+    log_attn_logit_max: bool = field(
+        default=False,
+        metadata={
+            "help": "Log the max pre-softmax attention logit (overall and per layer, max over heads) every "
+            "logging_steps, computed on that optimizer step's micro-batches."
         },
     )
 
@@ -690,6 +698,17 @@ def main(args: FlatArguments, tc: TokenizerConfig):
         # the scheduler is called every micro-batch (not just on optimizer steps).
         lr_scheduler = _create_scheduler(args, optimizer, args.max_train_steps * args.gradient_accumulation_steps)
 
+    attn_logit_monitor = None
+    if args.log_attn_logit_max:
+        if not args.logging_steps:
+            raise ValueError("log_attn_logit_max requires logging_steps.")
+        if args.sequence_parallel_size > 1:
+            raise ValueError("log_attn_logit_max is not supported with sequence parallelism.")
+        model_config = accelerator.unwrap_model(model).config
+        attn_logit_monitor = AttentionLogitMonitor(
+            model_config._attn_implementation, model_config.num_hidden_layers, accelerator.device
+        )
+
     # Figure out how many steps we should save the Accelerator states
     checkpointing_steps = args.checkpointing_steps
     if checkpointing_steps is not None and str(checkpointing_steps).lower() != "epoch":
@@ -784,12 +803,15 @@ def main(args: FlatArguments, tc: TokenizerConfig):
             local_pred_tokens += pred_tokens_in_batch
             local_pred_tokens_this_log_period += pred_tokens_in_batch
 
+            # Only track during the optimizer step that will be logged; `completed_steps` is incremented after it.
+            track_attn_logits = attn_logit_monitor is not None and (completed_steps + 1) % args.logging_steps == 0
             with accelerator.accumulate(model):
-                if args.load_balancing_loss:
-                    outputs = model(**batch, use_cache=False, output_router_logits=True)
-                    total_aux_loss += outputs.aux_loss.detach().float()
-                else:
-                    outputs = model(**batch, use_cache=False)
+                with attn_logit_monitor.track(batch) if track_attn_logits else contextlib.nullcontext():
+                    if args.load_balancing_loss:
+                        outputs = model(**batch, use_cache=False, output_router_logits=True)
+                        total_aux_loss += outputs.aux_loss.detach().float()
+                    else:
+                        outputs = model(**batch, use_cache=False)
 
                 loss = outputs.loss
                 del outputs
@@ -896,6 +918,11 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                     )
                     avg_loss = sum_loss / total_fwd_passes
                     metrics_to_log["train_loss"] = avg_loss
+                    if attn_logit_monitor is not None:
+                        layer_max = accelerator.gather(attn_logit_monitor.pop()[None]).amax(dim=0).tolist()
+                        metrics_to_log["attn_logit_max"] = max(layer_max)
+                        for layer_idx, value in enumerate(layer_max):
+                            metrics_to_log[f"attn_logit_max/layer_{layer_idx}"] = value
                     if args.verbose:
                         sec_per_step = (time.perf_counter() - start_time) / (completed_steps - resume_step)
                         steps_remaining = args.max_train_steps - completed_steps
