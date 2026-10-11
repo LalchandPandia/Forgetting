@@ -21,7 +21,6 @@ from torch.utils.data import (
     DataLoader,
     DistributedSampler,
 )
-from datasets import load_from_disk
 
 random.seed(0)
 
@@ -292,6 +291,10 @@ def distributed_dataloader(dataset, batch_size, collate_fn, shuffle, seed, local
     return dataloader, sampler
 
 
+GSM8K_TRAIN_PATH = '/net/spaces/scratch/lcpandia/data/processed/llama3/gsm8k/perplexity_p0_olmo2_7B/100_perplexity_p0_olmo2_7B_gsm8k.jsonl'
+GSM8K_TEST_PATH = '/home/lcpandia/Forgetting/open-instruct/data/eval/gsm8k_official_test.jsonl'
+
+
 class GSM8KDataset(BaseDataset):
     def __init__(self, num_datapoints, max_seq_length, tokenizer, dataset_split='eval', for_generation=False, **kwargs):
         super().__init__()
@@ -303,11 +306,13 @@ class GSM8KDataset(BaseDataset):
         self.id_to_datapoint = dict()
         self.model_name = kwargs.get('model_name', None)
 
-        path = '/scratch/gpfs/DANQIC/howardchen/data/openai/gsm8k'
-        dataset = load_from_disk(path)
-
         _dataset_split = 'test' if dataset_split == 'eval' else dataset_split
-        dataset = dataset[_dataset_split]
+        path = GSM8K_TRAIN_PATH if _dataset_split == 'train' else GSM8K_TEST_PATH
+        print(f'Loading data from: {path}')
+        with open(path, 'r') as f:
+            rows = [json.loads(line) for line in f]
+        # Rows are {"messages": [user, assistant], ...}; keep only the fields this class expects.
+        dataset = [dict(question=row['messages'][0]['content'], answer=row['messages'][1]['content']) for row in rows]
         if num_datapoints == 'all':
             num_datapoints = len(dataset)
         self.num_datapoints = min(num_datapoints, len(dataset))

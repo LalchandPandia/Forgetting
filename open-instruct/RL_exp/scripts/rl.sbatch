@@ -43,7 +43,8 @@ model_name="Qwen/Qwen2.5-7B-Instruct"
 ###############################################################################
 
 # Dataset ######################################################################
-dataset_name="IFEvalDataset"
+dataset_name="GSM8KDataset"
+#dataset_name="IFEvalDataset"
 #dataset_name="MMLUDataset"
 #dataset_name="CountdownDataset"
 ###############################################################################
