@@ -216,6 +216,7 @@ class GRPOLoss(BaseLoss):
             outcome_rewards.append([float(reward_model.compute_outcome_reward(text, datapoint)) for text in parsed_on_policy_texts])
 
         outcome_rewards = torch.tensor(outcome_rewards).to(input_ids.device)  # shape = bsz x num_generation_per_prompt
+        raw_outcome_rewards = outcome_rewards.clone().detach()  # correctness before the EOS mask
         outcome_rewards = outcome_rewards * batch_ends_with_eos
         or_std = outcome_rewards.std(dim=1, keepdim=True) + 1e-8
         or_mean = outcome_rewards.mean(dim=1, keepdim=True)
@@ -236,20 +237,46 @@ class GRPOLoss(BaseLoss):
             kl = 0.5 * (logprobs - ref_logprobs).pow(2)
             avg_kl = (kl * action_mask).sum(dim=-1) / action_mask.sum(dim=-1)
             avg_kl = avg_kl.reshape(bsz, num_generation_per_prompt).mean(dim=1, keepdim=True)
+
+            # Logging-only KL estimators (k1: log-ratio, k3: unbiased non-negative), token-averaged per sample.
+            with torch.no_grad():
+                log_ratio = (logprobs - ref_logprobs).detach()
+                kl_k1 = masked_mean(log_ratio, action_mask, axis=-1)
+                kl_k3 = masked_mean(torch.exp(-log_ratio) - 1 + log_ratio, action_mask, axis=-1)
         else:
             kl = 0.0
             avg_kl = torch.zeros(bsz, 1).to(input_ids.device)
+            kl_k1 = kl_k3 = torch.zeros(bsz * num_generation_per_prompt).to(input_ids.device)
         #######################################################################
 
         avg_logprobs = (logprobs * action_mask).sum(dim=-1) / action_mask.sum(dim=-1)
         avg_logprobs = avg_logprobs.reshape(bsz, num_generation_per_prompt, -1).squeeze(-1)
 
+        entropy = self.token_entropy(logits.detach(), action_mask)  # (bsz * num_generation_per_prompt)
+
         loss = -(advantages * logprobs - kl_beta * kl)  # shape = (bsz * num_generation_per_prompt) x seq_length
         loss = ((loss * action_mask).sum(dim=-1) / action_mask.sum(dim=-1)).mean()
 
+        to_groups = lambda t: t.reshape(bsz, num_generation_per_prompt).detach()
         return ModelOutput(
             loss=loss,
             logprobs=avg_logprobs,         # bsz x num_generation_per_prompt
             kl=avg_kl,                     # bsz x 1
             rewards=orig_outcome_rewards,  # bsz x num_generation_per_prompt
+            raw_rewards=raw_outcome_rewards,     # bsz x num_generation_per_prompt
+            advantages=to_groups(advantages),    # bsz x num_generation_per_prompt
+            entropy=to_groups(entropy),          # bsz x num_generation_per_prompt
+            kl_k1=to_groups(kl_k1),              # bsz x num_generation_per_prompt
+            kl_k3=to_groups(kl_k3),              # bsz x num_generation_per_prompt
         )
+
+    @torch.no_grad()
+    def token_entropy(self, logits, action_mask, chunk_size=1024):
+        """Per-sample mean entropy over response tokens, chunked so the (seq, vocab) fp32 softmax stays small."""
+        logits = logits[..., :-1, :]
+        entropy = torch.zeros(action_mask.shape, dtype=torch.float32, device=logits.device)
+        for row in range(logits.size(0)):
+            for start in range(0, logits.size(1), chunk_size):
+                logp = F.log_softmax(logits[row, start:start + chunk_size].float(), dim=-1)
+                entropy[row, start:start + chunk_size] = -(logp.exp() * logp).sum(dim=-1)
+        return masked_mean(entropy, action_mask, axis=-1)

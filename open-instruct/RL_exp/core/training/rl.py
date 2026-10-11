@@ -17,6 +17,7 @@ from pathlib import Path
 import fire
 import wandb
 
+import numpy as np
 import ray
 import vllm
 from vllm import LLM, SamplingParams
@@ -59,15 +60,26 @@ def print_gpu_usage(num_total_gpus):
     print('=====================================')
 
 
+def mean_sampled_logprob(completion):
+    """Mean vLLM logprob of the tokens actually sampled in one completion (nan if unavailable)."""
+    if not completion.logprobs or not completion.token_ids:
+        return float('nan')
+    values = [position[token_id].logprob for position, token_id in zip(completion.logprobs, completion.token_ids)]
+    return sum(values) / len(values)
+
+
 @ray.remote(num_gpus=1)
 class OnPolicyActor:
     def __init__(self, model_name, num_gen_gpus, max_seq_length, max_new_tokens):
+        # vLLM V1 (>= 0.11): run the engine core in this process so update_weight can reach the model.
+        os.environ['VLLM_ENABLE_V1_MULTIPROCESSING'] = '0'
         self.model = LLM(
             model=model_name,
             tensor_parallel_size=num_gen_gpus,
             #max_model_len=max_seq_length + max_new_tokens,
+            # Cached KV (e.g. the shared system-prompt prefix) would go stale after each weight update.
+            enable_prefix_caching=False,
         )
-        self.model_update_group = dist.new_group(ranks=list(range(num_gen_gpus)))
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     def generate(
@@ -84,6 +96,7 @@ class OnPolicyActor:
                 temperature=temperature,
                 top_p=1.0,
                 n=num_generation_per_prompt,
+                logprobs=0,  # sampled token only; raw (pre-temperature) logprobs by default in vLLM V1
             ),
             use_tqdm=False,
         )
@@ -92,13 +105,17 @@ class OnPolicyActor:
                 input_text=output.prompt,
                 generated_text=[output.outputs[i].text for i in range(num_generation_per_prompt)],
                 finish_reason=[output.outputs[i].finish_reason for i in range(num_generation_per_prompt)],
+                num_tokens=[len(output.outputs[i].token_ids) for i in range(num_generation_per_prompt)],
+                logprob_mean=[mean_sampled_logprob(output.outputs[i]) for i in range(num_generation_per_prompt)],
             ) for output in outputs
         ]
         return results
 
     def update_weight(self, name, param):
-        dist.broadcast(param, src=0, group=self.model_update_group)
-        self.model.llm_engine.model_executor.driver_worker.model_runner.model.load_weights(weights=[(name, param)])
+        # `param` arrives via Ray from the paired trainer rank. Each actor has tensor_parallel_size=1, so the
+        # original intra-actor broadcast was a no-op and is dropped.
+        model = self.model.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        model.load_weights(weights=[(name, param)])
 
 
 def generate_on_policy_data(
@@ -123,42 +140,102 @@ def generate_on_policy_data(
     on_policy_texts = [result['generated_text'] for result in results]
     parsed_on_policy_texts = [[dataset.parse_output_text(text) for text in on_policy_text] for on_policy_text in on_policy_texts]
     ends_with_eos = [[r == 'stop' for r in result['finish_reason']] for result in results]
-    return on_policy_texts, parsed_on_policy_texts, ends_with_eos
+    gen_stats = dict(
+        num_tokens=[result['num_tokens'] for result in results],        # bsz x num_generation_per_prompt
+        vllm_logprob_mean=[result['logprob_mean'] for result in results],
+    )
+    return on_policy_texts, parsed_on_policy_texts, ends_with_eos, gen_stats
 
 
-def log_stats(
-    run_name,
-    global_step,
-    total_training_steps,
-    epoch,
-    loss,
-    reward,
-    kl,
-    grad_norm,
-    scheduler,
-    wandb_project='none',
-    exp_manager=None,
-    time_spent=None,
-):
-    lr = scheduler.get_last_lr()[0]
-    if time_spent is not None:
-        time_spent = time_spent / 60
-    log_msg = f'[train] run_name={run_name} | global_step={global_step} / {total_training_steps} | epoch={epoch} | loss={loss:.6f} | reward={reward.item():.4f} | kl={kl.item():.4f} | lr={lr:.10f} | grad_norm={grad_norm:.6f} | time_spent={time_spent:.2f} min'
+@torch.no_grad()
+def run_generation_eval(on_policy_actor, eval_dataset, tokenizer, local_rank, world_size, max_new_tokens):
+    """Greedy pass@1 on this rank's shard of the eval set, using the paired (already weight-synced) vLLM actor."""
+    datapoints = eval_dataset.datapoints[local_rank::world_size]
+    if not datapoints:
+        return dict(correct=[], ends_with_eos=[], num_tokens=[])
+    input_texts = []
+    for datapoint in datapoints:
+        messages = datapoint['messages']
+        if messages[-1]['role'] == 'assistant':
+            messages = messages[:-1]
+        input_texts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
+    results = ray.get(on_policy_actor.generate.remote(
+        input_texts=input_texts,
+        max_new_tokens=max_new_tokens,
+        temperature=0.0,
+        num_generation_per_prompt=1,
+    ))
+    return dict(
+        correct=[
+            float(eval_dataset.reward_fn(eval_dataset.parse_output_text(result['generated_text'][0]), datapoint))
+            for result, datapoint in zip(results, datapoints)
+        ],
+        ends_with_eos=[float(result['finish_reason'][0] == 'stop') for result in results],
+        num_tokens=[result['num_tokens'][0] for result in results],
+    )
 
+
+def gather_from_all_ranks(obj):
+    """all_gather a picklable object; returns the list of every rank's object (collective: call on all ranks)."""
+    gathered = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, obj)
+    return gathered
+
+
+def summarize_step_stats(per_rank_stats):
+    """Turn the per-rank lists collected over one optimizer step into scalar metrics."""
+    def flat(key):
+        return np.array([v for stats in per_rank_stats for v in stats[key]], dtype=np.float64)
+
+    rewards = flat('reward')
+    raw_rewards = flat('raw_reward')
+    lengths = flat('num_tokens')
+    advantages = flat('advantage')
+    # Groups: one row of num_generation_per_prompt rewards per prompt.
+    groups = [np.asarray(group, dtype=np.float64) for stats in per_rank_stats for group in stats['reward_groups']]
+    solved = rewards > 0
+    logprob_diff = np.abs(flat('local_logprob_mean') - flat('vllm_logprob_mean'))
+
+    def safe(fn, values):
+        return float(fn(values)) if values.size else float('nan')
+
+    return {
+        'train/loss': safe(np.mean, flat('loss')),
+        'train/reward': safe(np.mean, rewards),
+        'train/reward_raw': safe(np.mean, raw_rewards),
+        'train/stop_rate': safe(np.mean, flat('ends_with_eos')),
+        'train/groups_zero_std_frac': float(np.mean([g.std() == 0 for g in groups])),
+        'train/groups_all_correct_frac': float(np.mean([(g > 0).all() for g in groups])),
+        'train/groups_all_wrong_frac': float(np.mean([(g == 0).all() for g in groups])),
+        'train/response_len_mean': safe(np.mean, lengths),
+        'train/response_len_min': safe(np.min, lengths),
+        'train/response_len_max': safe(np.max, lengths),
+        'train/response_len_solved_mean': safe(np.mean, lengths[solved]),
+        'train/response_len_unsolved_mean': safe(np.mean, lengths[~solved]),
+        'train/advantages_mean': safe(np.mean, advantages),
+        'train/advantages_std': safe(np.std, advantages),
+        'train/advantages_min': safe(np.min, advantages),
+        'train/advantages_max': safe(np.max, advantages),
+        'debug/vllm_vs_local_logprob_diff_mean': safe(np.nanmean, logprob_diff),
+        'debug/vllm_vs_local_logprob_diff_max': safe(np.nanmax, logprob_diff),
+        'policy/entropy_mean': safe(np.mean, flat('entropy')),
+        'objective/kl_penalty_k2': safe(np.mean, flat('kl')),
+        'objective/kl_k1': safe(np.mean, flat('kl_k1')),
+        'objective/kl_k3': safe(np.mean, flat('kl_k3')),
+        # Wall-clock per rank, reported for the slowest rank (the step's critical path).
+        'time/generation': max(stats['time_generation'] for stats in per_rank_stats),
+        'time/forward_backward': max(stats['time_forward_backward'] for stats in per_rank_stats),
+    }
+
+
+def log_stats(metrics, step, wandb_project='none', exp_manager=None):
+    log_msg = '[train] ' + ' | '.join(
+        f'{k}={v:.6g}' if isinstance(v, float) else f'{k}={v}' for k, v in metrics.items()
+    )
     if exp_manager is not None:
         exp_manager.write(log_msg)
-
     if wandb_project != 'none':
-        wandb.log({
-            'global_step': global_step,
-            'total_training_steps': total_training_steps,
-            'epoch': epoch,
-            'loss': loss,
-            'reward': reward,
-            'kl': kl,
-            'lr': lr,
-            'grad_norm': grad_norm,
-        })
+        wandb.log(metrics, step=step)
 
 
 def get_all_reduce_mean(tensor):
@@ -278,6 +355,8 @@ class RLRayFSDPTrainer(DistributedBaseTrainer):
         scheduler_type = kwargs.get('scheduler_type', None)
         gradient_clipping = kwargs.get('gradient_clipping', None)
         eval_every_n_steps = kwargs.get('eval_every_n_steps', None)
+        # Greedy pass@1 on the eval split via vLLM every N optimizer steps (and before training); 0 disables.
+        eval_generation_every_n_steps = kwargs.get('eval_generation_every_n_steps', 0)
         save_every_n_steps = kwargs.get('save_every_n_steps', None)
         print_every_n_steps = kwargs.get('print_every_n_steps', None)
         model_module_path = kwargs.get('model_module_path', None)
@@ -437,15 +516,45 @@ class RLRayFSDPTrainer(DistributedBaseTrainer):
                 yaml.dump(config, f)
 
             if wandb_project != 'none':
-                os.environ['WANDB_MODE'] = 'dryrun'
+                # Online logging (upstream forced WANDB_MODE=dryrun). Needs `wandb login` / WANDB_API_KEY on the node.
                 os.environ['WANDB_PROJECT'] = wandb_project
                 wandb.init(project=wandb_project, name=run_name, config=config, dir=run_base_dir)
+
+        def log_generation_eval(log_step):
+            eval_start = time.time()
+            per_rank = gather_from_all_ranks(run_generation_eval(
+                self.on_policy_actor, eval_dataset, tokenizer, local_rank, world_size, max_new_tokens,
+            ))
+            if local_rank == 0:
+                correct = [v for stats in per_rank for v in stats['correct']]
+                eos = [v for stats in per_rank for v in stats['ends_with_eos']]
+                lengths = [v for stats in per_rank for v in stats['num_tokens']]
+                log_stats({
+                    'eval/pass_at_1': float(np.mean(correct)),
+                    'eval/stop_rate': float(np.mean(eos)),
+                    'eval/response_len_mean': float(np.mean(lengths)),
+                    'eval/num_examples': len(correct),
+                    'time/eval': time.time() - eval_start,
+                }, step=log_step, wandb_project=wandb_project, exp_manager=exp_manager)
+
+        def new_step_stats():
+            return dict(
+                loss=[], reward=[], raw_reward=[], ends_with_eos=[], num_tokens=[], advantage=[], reward_groups=[],
+                local_logprob_mean=[], vllm_logprob_mean=[], entropy=[], kl=[], kl_k1=[], kl_k3=[],
+                time_generation=0.0, time_forward_backward=0.0,
+            )
 
         start_time = time.time()
         global_step = 0
         total_rewards = []
         total_kl = []
         best_model_reward = float('-inf')
+        step_stats = new_step_stats()
+
+        # wandb step = number of optimizer updates completed, so the pre-training eval lands at step 0.
+        if eval_generation_every_n_steps:
+            log_generation_eval(log_step=0)
+        step_start_time = time.time()
 
         self.model = model
         self.tokenizer = tokenizer
@@ -466,7 +575,8 @@ class RLRayFSDPTrainer(DistributedBaseTrainer):
 
                 ###############################################################
                 # NOTE: generate on-policy data
-                batch_on_policy_texts, batch_parsed_on_policy_texts, batch_ends_with_eos = generate_on_policy_data(
+                gen_start = time.time()
+                batch_on_policy_texts, batch_parsed_on_policy_texts, batch_ends_with_eos, gen_stats = generate_on_policy_data(
                     self.on_policy_actor,
                     tokenizer,
                     datapoint_ids,
@@ -475,8 +585,10 @@ class RLRayFSDPTrainer(DistributedBaseTrainer):
                     temperature,
                     num_generation_per_prompt,
                 )
+                step_stats['time_generation'] += time.time() - gen_start
                 ###############################################################
 
+                fwd_bwd_start = time.time()
                 output = loss_module.compute_loss(
                     model,
                     ref_model,
@@ -531,11 +643,31 @@ class RLRayFSDPTrainer(DistributedBaseTrainer):
                 ###############################################################
 
                 (loss / gradient_accumulation_steps).backward()
+                step_stats['time_forward_backward'] += time.time() - fwd_bwd_start
+
+                # Per-sample logging stats for this micro-batch (bsz x num_generation_per_prompt) ##########
+                step_stats['loss'].append(loss.item())
+                step_stats['reward'] += rewards.flatten().tolist()
+                step_stats['raw_reward'] += output.raw_rewards.flatten().tolist()
+                step_stats['ends_with_eos'] += [float(e) for group in batch_ends_with_eos for e in group]
+                step_stats['num_tokens'] += [n for group in gen_stats['num_tokens'] for n in group]
+                step_stats['advantage'] += output.advantages.flatten().tolist()
+                step_stats['reward_groups'] += rewards.tolist()
+                step_stats['local_logprob_mean'] += output.logprobs.flatten().tolist()
+                step_stats['vllm_logprob_mean'] += [v for group in gen_stats['vllm_logprob_mean'] for v in group]
+                step_stats['entropy'] += output.entropy.flatten().tolist()
+                step_stats['kl'] += kl.flatten().tolist()
+                step_stats['kl_k1'] += output.kl_k1.flatten().tolist()
+                step_stats['kl_k3'] += output.kl_k3.flatten().tolist()
+                ###################################################################################
+
                 if (step + 1) % gradient_accumulation_steps == 0:
+                    optimizer_start = time.time()
                     grad_norm = model.clip_grad_norm_(gradient_clipping).item()
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad()
+                    time_optimizer = time.time() - optimizer_start
                     loss = get_all_reduce_mean(loss.detach())
 
                     total_rewards = torch.cat(total_rewards, dim=0)
@@ -545,23 +677,19 @@ class RLRayFSDPTrainer(DistributedBaseTrainer):
                     total_kl = torch.cat(total_kl, dim=0)
                     kl = get_all_reduce_mean(total_kl.mean())
                     total_kl = []
+
+                    per_rank_stats = gather_from_all_ranks(step_stats)
+                    step_stats = new_step_stats()
                     if local_rank == 0:
-                        current_time = time.time()
-                        log_stats(
-                            run_name=run_name,
-                            global_step=global_step,
-                            total_training_steps=total_training_steps,
-                            epoch=epoch,
-                            loss=loss,
-                            reward=reward,
-                            kl=kl,
-                            grad_norm=grad_norm,
-                            scheduler=scheduler,
-                            wandb_project=wandb_project,
-                            exp_manager=exp_manager,
-                            time_spent=current_time - exp_start_time,
-                        )
-                        print_gpu_usage(num_gpus)
+                        metrics = summarize_step_stats(per_rank_stats)
+                        metrics.update({
+                            'train/global_step': global_step,
+                            'train/epoch': epoch,
+                            'train/lr': scheduler.get_last_lr()[0],
+                            'train/grad_norm': grad_norm,
+                            'time/optimizer': time_optimizer,
+                            'time/elapsed_min': (time.time() - exp_start_time) / 60,
+                        })
 
                     if reward > best_model_reward:
                         best_model_reward = reward
@@ -579,9 +707,20 @@ class RLRayFSDPTrainer(DistributedBaseTrainer):
                                 dist.broadcast(param, src=0)
                                 ray.get(self.on_policy_actor.update_weight.remote(name, param))
                         dist.barrier()
+                    weight_sync_start = time.time()
                     update_on_policy_actor_weights(model, self.on_policy_actor, local_rank)
+                    time_weight_sync = time.time() - weight_sync_start
                     print_rank0('Weights updated!!!')
                     ###########################################################
+
+                    if local_rank == 0:
+                        metrics['time/weight_sync'] = time_weight_sync
+                        metrics['time/step'] = time.time() - step_start_time
+                        log_stats(metrics, step=global_step + 1, wandb_project=wandb_project, exp_manager=exp_manager)
+                        print_gpu_usage(num_gpus)
+
+                    if eval_generation_every_n_steps and (global_step + 1) % eval_generation_every_n_steps == 0:
+                        log_generation_eval(log_step=global_step + 1)
 
                     if global_step and global_step % eval_every_n_steps == 0:
                         eval_loss = run_evaluation(model, eval_dataloader, local_rank)
@@ -605,6 +744,7 @@ class RLRayFSDPTrainer(DistributedBaseTrainer):
     
                     dist.barrier()
                     global_step += 1
+                    step_start_time = time.time()
         dist.barrier()
     
         self.save_model(local_rank, model, tokenizer, optimizer, run_dir, ckpt_name='final')

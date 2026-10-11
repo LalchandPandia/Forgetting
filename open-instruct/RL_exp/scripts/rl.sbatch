@@ -14,8 +14,8 @@
 export NCCL_IB_DISABLE=1
 # Works around a conda numpy/mkl-service vs. libgomp conflict that crashes vLLM.
 export MKL_THREADING_LAYER=GNU
-# rl.py syncs weights via llm_engine.model_executor.driver_worker..., which only exists in vLLM's V0 engine.
-export VLLM_USE_V1=0
+# rl.py's weight sync needs vLLM's engine in the actor process; OnPolicyActor also sets this itself.
+export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
 echo "hostname $(hostname)"
 which python
@@ -50,7 +50,7 @@ dataset_name="GSM8KDataset"
 ###############################################################################
 
 seed=0
-wandb_project="none"
+wandb_project="forgetting-rl"  # "none" disables wandb
 
 ref_model_name="${model_name}"
 reward_model_name="none"
@@ -74,10 +74,6 @@ max_seq_length=2000
 show_gpu_usage=false
 ###############################################################################
 
-if [[ "${wandb_project}" != "none" ]]; then
-    wandb_project="${dataset_name}"
-fi
-
 data_module_path="core.data"
 model_module_path="transformers.AutoModelForCausalLM"
 loss_module_path="core.training.objectives.GRPOLoss"
@@ -90,7 +86,9 @@ elif [[ "${model_name_short}" == *"qwen"* ]]; then
     transformer_layer_module_path="transformers.models.qwen2.modeling_qwen2.Qwen2DecoderLayer"
 fi
 
-num_eval_datapoints=20
+num_eval_datapoints="all"
+# Greedy pass@1 on the eval split via vLLM before training and every N optimizer steps; 0 disables.
+eval_generation_every_n_steps=20
 
 warmup_ratio=0.0
 scheduler_type="constant"
@@ -127,6 +125,7 @@ args=(
     --scheduler_type ${scheduler_type} \
     --gradient_clipping ${gradient_clipping} \
     --eval_every_n_steps ${eval_every_n_steps} \
+    --eval_generation_every_n_steps ${eval_generation_every_n_steps} \
     --save_every_n_steps ${save_every_n_steps} \
     --print_every_n_steps ${print_every_n_steps} \
     --model_module_path ${model_module_path} \
