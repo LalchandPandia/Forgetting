@@ -4,6 +4,7 @@ python -m core.data
 import os
 import re
 import ast
+import sys
 import json
 import math
 import random
@@ -235,19 +236,23 @@ class BaseDataset(Dataset):
             batch_input_texts = [chat_template_fn(datapoint['messages']) for datapoint in batch_datapoints]
             yield batch_input_texts, batch_datapoints
     
+    # Text forced at the start of the assistant turn (e.g. MedCalc's "Let me solve this step by step.\n<think>\n").
+    # It is part of the generation prompt, and GRPOLoss masks it out of the loss since the policy didn't sample it.
+    assistant_prefix = ''
+
+    def build_generation_prompt(self, messages):
+        """Chat-templated prompt for generation: drops a trailing assistant turn and appends `assistant_prefix`."""
+        if messages[-1]['role'] == 'assistant':
+            messages = messages[:-1]
+        tokenizer = tokenizer_factory(self.tokenizer, dataset_split='eval')
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) + self.assistant_prefix
+
     def tokenize_for_inference_by_ids(self, datapoint_ids: list[int]):
         tokenizer = tokenizer_factory(self.tokenizer, dataset_split='eval')
 
         datapoints = [self.id_to_datapoint[idx] for idx in datapoint_ids]
         messages = [datapoint['messages'][:-1] for datapoint in datapoints]
-        input_texts = [
-            tokenizer.apply_chat_template(
-                msg,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            for msg in messages
-        ]
+        input_texts = [self.build_generation_prompt(msg) for msg in messages]
         encoded = tokenizer.batch_encode_plus(
             input_texts,
             return_tensors='pt',
@@ -389,6 +394,106 @@ class GSM8KDataset(BaseDataset):
         targets = datapoint['targets']
         reward = pred_text in targets
         return reward
+
+
+MEDCALC_TRAIN_PATH = '/net/spaces/scratch/lcpandia/data/processed/medcalc/MedCalc/train.jsonl'
+MEDCALC_TEST_PATH = '/net/spaces/scratch/lcpandia/data/processed/medcalc/MedCalc/test.jsonl'
+# Must equal ASSISTANT_PREFIX in Forgetting/utils/prepare_medcalc.py (checked against every row below). The trailing
+# "\n" matches eval_medcalc_qwen.build_prompt, which appends ASSISTANT_PREFIX + "\n" after the generation prompt.
+MEDCALC_ASSISTANT_PREFIX = 'Let me solve this step by step.\n<think>'
+# Forgetting/utils, home of medcalc_grading.py (shared with eval_medcalc_qwen.py so RL reward == eval correctness).
+MEDCALC_UTILS_DIR = Path(__file__).resolve().parents[3] / 'utils'
+
+
+class MedCalcDataset(BaseDataset):
+    """MedCalc-Bench-Verified rows from utils/prepare_medcalc.py: {"messages": [system, user, assistant], ...metadata}."""
+    assistant_prefix = MEDCALC_ASSISTANT_PREFIX + '\n'
+
+    def __init__(self, num_datapoints, max_seq_length, tokenizer, dataset_split='eval', for_generation=False, **kwargs):
+        super().__init__()
+        if str(MEDCALC_UTILS_DIR) not in sys.path:
+            sys.path.insert(0, str(MEDCALC_UTILS_DIR))
+        from medcalc_grading import extract_answer, grade
+        self.extract_answer = extract_answer
+        self.grade = grade
+
+        self.num_datapoints = num_datapoints
+        self.max_seq_length = max_seq_length
+        self.tokenizer = tokenizer
+        self.dataset_split = dataset_split
+        self.data = []
+        self.id_to_datapoint = dict()
+        self.model_name = kwargs.get('model_name', None)
+
+        _dataset_split = 'test' if dataset_split == 'eval' else dataset_split
+        path = MEDCALC_TRAIN_PATH if _dataset_split == 'train' else MEDCALC_TEST_PATH
+        print(f'Loading data from: {path}')
+        with open(path, 'r') as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+
+        if num_datapoints == 'all':
+            num_datapoints = len(rows)
+        self.num_datapoints = num_datapoints = min(num_datapoints, len(rows))
+
+        all_tokenized = []
+        datapoint_ids = []
+        for datapoint_idx, row in tqdm(enumerate(rows), total=num_datapoints):
+            if datapoint_idx >= num_datapoints:
+                break
+            assistant_content = row['messages'][-1]['content']
+            if not assistant_content.startswith(MEDCALC_ASSISTANT_PREFIX):
+                raise ValueError(
+                    f'Row {datapoint_idx} assistant turn does not start with MEDCALC_ASSISTANT_PREFIX; '
+                    'keep it in sync with utils/prepare_medcalc.py ASSISTANT_PREFIX.'
+                )
+            # Train keeps the ground-truth assistant turn (used for the length filter; dropped before generation).
+            messages = row['messages'] if _dataset_split == 'train' and not for_generation else row['messages'][:-1]
+            tokenized = tokenize_messages(messages, tokenizer, max_seq_length, dataset_split, **kwargs)
+            if tokenized is None:
+                continue
+            all_tokenized.append(tokenized)
+            datapoint_ids.append(datapoint_idx)
+            self.id_to_datapoint[datapoint_idx] = dict(
+                messages=messages,
+                targets=[row['ground_truth_answer']],
+                ground_truth_answer=row['ground_truth_answer'],
+                category=row.get('category'),
+                output_type=row.get('output_type'),
+                lower_limit=row.get('lower_limit'),
+                upper_limit=row.get('upper_limit'),
+                calculator_name=row.get('calculator_name'),
+            )
+
+        input_ids = [tokenized['input_ids'] for tokenized in all_tokenized]
+        attention_mask = [tokenized['attention_mask'] for tokenized in all_tokenized]
+        labels = [tokenized['labels'] for tokenized in all_tokenized]
+
+        datapoint_ids = torch.tensor(datapoint_ids).long()
+        input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
+        attention_mask = pad_sequence(attention_mask, batch_first=True, padding_value=0)
+        labels = pad_sequence(labels, batch_first=True, padding_value=-100)
+
+        self.data = dict(
+            datapoint_ids=datapoint_ids,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
+        self.datapoints = [self.id_to_datapoint[datapoint_id] for datapoint_id in datapoint_ids.tolist()]
+
+    def parse_output_text(self, output_text):
+        # The generated text starts after the prefill, so the <answer>{"answer": ...}</answer> block is in it.
+        return self.extract_answer(output_text)
+
+    def reward_fn(self, pred_text, datapoint):
+        return self.grade(
+            pred_text,
+            datapoint['ground_truth_answer'],
+            category=datapoint['category'],
+            output_type=datapoint['output_type'],
+            lower_limit=datapoint['lower_limit'],
+            upper_limit=datapoint['upper_limit'],
+        )
 
 
 class MATHDataset(BaseDataset):

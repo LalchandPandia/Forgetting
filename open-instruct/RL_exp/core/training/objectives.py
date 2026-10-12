@@ -181,10 +181,14 @@ class GRPOLoss(BaseLoss):
         bsz = len(datapoints)
         num_generation_per_prompt = len(batch_on_policy_texts[0])
 
+        # Prefill forced at the start of the assistant turn during generation (dataset.assistant_prefix; '' for most
+        # datasets). It is prepended so the trainer scores the same token sequence vLLM conditioned on, then masked.
+        assistant_prefix = kwargs.get('assistant_prefix', '') or ''
+
         # tokenize on-policy texts
         batch_messages_without_last_assistant = [datapoint['messages'][:-1] if datapoint['messages'][-1]['role'] == 'assistant' else datapoint['messages'] for datapoint in datapoints]
         batch_on_policy_messages = [
-            [messages_without_last_assistant + [dict(role='assistant', content=text)] for text in on_policy_texts]
+            [messages_without_last_assistant + [dict(role='assistant', content=assistant_prefix + text)] for text in on_policy_texts]
             for messages_without_last_assistant, on_policy_texts in zip(batch_messages_without_last_assistant, batch_on_policy_texts)
         ]
         batch_on_policy_tokenized = [
@@ -198,6 +202,16 @@ class GRPOLoss(BaseLoss):
             ]
             for on_policy_messages in batch_on_policy_messages
         ]
+
+        if assistant_prefix:
+            # tokenize_messages masks up to and including the assistant header; extend the mask over the prefill.
+            for messages_without_last_assistant, on_policy_tokenized in zip(batch_messages_without_last_assistant, batch_on_policy_tokenized):
+                prompt_text = tokenizer.apply_chat_template(messages_without_last_assistant, tokenize=False, add_generation_prompt=False)
+                num_prompt_tokens = len(tokenizer(
+                    prompt_text + tokenizer.assistant_start_text + assistant_prefix, add_special_tokens=False,
+                ).input_ids)
+                for tokenized in on_policy_tokenized:
+                    tokenized['labels'][:num_prompt_tokens] = -100
 
         input_ids = [tokenized['input_ids'] for on_policy_tokenized in batch_on_policy_tokenized for tokenized in on_policy_tokenized]
         attention_mask = [tokenized['attention_mask'] for on_policy_tokenized in batch_on_policy_tokenized for tokenized in on_policy_tokenized]

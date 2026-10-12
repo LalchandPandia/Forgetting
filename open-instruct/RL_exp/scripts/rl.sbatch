@@ -89,6 +89,8 @@ fi
 num_eval_datapoints="all"
 # Greedy pass@1 on the eval split via vLLM before training and every N optimizer steps; 0 disables.
 eval_generation_every_n_steps=20
+# Log the exact vLLM prompt + first sampled response for the first N training micro-batches (rank 0).
+num_prompts_to_print=3
 
 warmup_ratio=0.0
 scheduler_type="constant"
@@ -126,6 +128,7 @@ args=(
     --gradient_clipping ${gradient_clipping} \
     --eval_every_n_steps ${eval_every_n_steps} \
     --eval_generation_every_n_steps ${eval_generation_every_n_steps} \
+    --num_prompts_to_print ${num_prompts_to_print} \
     --save_every_n_steps ${save_every_n_steps} \
     --print_every_n_steps ${print_every_n_steps} \
     --model_module_path ${model_module_path} \

@@ -143,6 +143,7 @@ def generate_on_policy_data(
     gen_stats = dict(
         num_tokens=[result['num_tokens'] for result in results],        # bsz x num_generation_per_prompt
         vllm_logprob_mean=[result['logprob_mean'] for result in results],
+        input_texts=input_texts,                                        # exact prompt strings sent to vLLM
     )
     return on_policy_texts, parsed_on_policy_texts, ends_with_eos, gen_stats
 
@@ -153,12 +154,8 @@ def run_generation_eval(on_policy_actor, eval_dataset, tokenizer, local_rank, wo
     datapoints = eval_dataset.datapoints[local_rank::world_size]
     if not datapoints:
         return dict(correct=[], ends_with_eos=[], num_tokens=[])
-    input_texts = []
-    for datapoint in datapoints:
-        messages = datapoint['messages']
-        if messages[-1]['role'] == 'assistant':
-            messages = messages[:-1]
-        input_texts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
+    # Same prompt construction as training rollouts, including the dataset's assistant prefill.
+    input_texts = [eval_dataset.build_generation_prompt(datapoint['messages']) for datapoint in datapoints]
     results = ray.get(on_policy_actor.generate.remote(
         input_texts=input_texts,
         max_new_tokens=max_new_tokens,
@@ -357,6 +354,8 @@ class RLRayFSDPTrainer(DistributedBaseTrainer):
         eval_every_n_steps = kwargs.get('eval_every_n_steps', None)
         # Greedy pass@1 on the eval split via vLLM every N optimizer steps (and before training); 0 disables.
         eval_generation_every_n_steps = kwargs.get('eval_generation_every_n_steps', 0)
+        # Log the exact vLLM prompt + first sampled response for the first N training micro-batches (rank 0); 0 disables.
+        num_prompts_to_print = kwargs.get('num_prompts_to_print', 0)
         save_every_n_steps = kwargs.get('save_every_n_steps', None)
         print_every_n_steps = kwargs.get('print_every_n_steps', None)
         model_module_path = kwargs.get('model_module_path', None)
@@ -599,6 +598,7 @@ class RLRayFSDPTrainer(DistributedBaseTrainer):
                     datapoints,
                     tokenizer,
                     local_rank=local_rank,
+                    assistant_prefix=train_dataset.assistant_prefix,
                     **kwargs,
                 )
                 loss = output.loss
@@ -608,6 +608,17 @@ class RLRayFSDPTrainer(DistributedBaseTrainer):
 
                 total_rewards.append(rewards)
                 total_kl.append(kl)
+
+                if local_rank == 0 and epoch == 0 and step < num_prompts_to_print:
+                    for prompt_idx, input_text in enumerate(gen_stats['input_texts']):
+                        exp_manager.write(
+                            f'{"=" * 100}\n[prompt sample: step={step} batch_idx={prompt_idx} '
+                            f'datapoint_id={datapoint_ids[prompt_idx]}] EXACT PROMPT SENT TO vLLM:\n{input_text}\n'
+                            f'{"-" * 100}\n[first of {num_generation_per_prompt} samples | '
+                            f'reward={rewards[prompt_idx, 0].item()} | ends_with_eos={batch_ends_with_eos[prompt_idx][0]} | '
+                            f'parsed={batch_parsed_on_policy_texts[prompt_idx][0]!r}]\n'
+                            f'{batch_on_policy_texts[prompt_idx][0]}\n{"=" * 100}'
+                        )
                 ###############################################################
                 if print_every_n_steps is not None and step != 0 and step % print_every_n_steps == 0 and local_rank == 0:
                     try:
