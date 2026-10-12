@@ -50,7 +50,7 @@ dataset_name="GSM8KDataset"
 ###############################################################################
 
 seed=0
-wandb_project="forgetting-rl"  # "none" disables wandb
+wandb_project="open_instruct_internal"  # same project as SFT (finetune.py default); "none" disables wandb
 
 ref_model_name="${model_name}"
 reward_model_name="none"
@@ -70,7 +70,7 @@ gradient_accumulation_steps=16
 train_batch_size_per_device=1
 eval_batch_size_per_device=2
 
-max_seq_length=2000
+max_seq_length=4096
 show_gpu_usage=false
 ###############################################################################
 
