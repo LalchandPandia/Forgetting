@@ -16,6 +16,9 @@ export NCCL_IB_DISABLE=1
 export MKL_THREADING_LAYER=GNU
 # rl.py's weight sync needs vLLM's engine in the actor process; OnPolicyActor also sets this itself.
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
+# Flush Python output immediately so job logs show progress live and survive a time-limit kill.
+# Ray actors inherit it, so their output is forwarded as it happens too.
+export PYTHONUNBUFFERED=1
 
 echo "hostname $(hostname)"
 which python
@@ -43,7 +46,8 @@ model_name="Qwen/Qwen2.5-7B-Instruct"
 ###############################################################################
 
 # Dataset ######################################################################
-dataset_name="GSM8KDataset"
+dataset_name="MedCalcDataset"
+#dataset_name="GSM8KDataset"
 #dataset_name="IFEvalDataset"
 #dataset_name="MMLUDataset"
 #dataset_name="CountdownDataset"
