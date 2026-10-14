@@ -869,6 +869,8 @@ DEFAULT_SFT_MESSAGES_KEY = "messages"
 GROUND_TRUTHS_KEY = "ground_truth"
 VERIFIER_SOURCE_KEY = "dataset"
 RAW_PROMPT_KEY = "prompt"
+# Optional per-row text forced at the start of the assistant turn (see rlvr_tokenize_prefill_v1).
+ASSISTANT_PREFILL_KEY = "assistant_prefill"
 
 
 @dataclass
@@ -1504,6 +1506,42 @@ def rlvr_tokenize_v3(
     return row
 
 
+def rlvr_tokenize_prefill_v1(
+    row: dict[str, Any],
+    tokenizer: PreTrainedTokenizer,
+    sft_messages_key: str = DEFAULT_SFT_MESSAGES_KEY,
+    ground_truths_key: str = GROUND_TRUTHS_KEY,
+    verifier_source_key: str = VERIFIER_SOURCE_KEY,
+    system_prompt_override: str | None = None,
+    tool_definitions: list[dict[str, Any]] | None = None,
+    pass_tools_to_chat_template: bool = True,
+):
+    """``rlvr_tokenize_v3`` plus an optional assistant prefill.
+
+    If the row has a non-empty ``assistant_prefill`` string (e.g. MedCalc's
+    "Let me solve this step by step.\\n<think>\\n"), its tokens are appended after the
+    generation prompt, so generation continues mid-assistant-turn. Being part of the
+    prompt, the prefill is excluded from the policy loss, and the verifier only sees
+    the generated continuation.
+    """
+    prefill = row.get(ASSISTANT_PREFILL_KEY) or ""
+    row = rlvr_tokenize_v3(
+        row,
+        tokenizer,
+        sft_messages_key=sft_messages_key,
+        ground_truths_key=ground_truths_key,
+        verifier_source_key=verifier_source_key,
+        system_prompt_override=system_prompt_override,
+        tool_definitions=tool_definitions,
+        pass_tools_to_chat_template=pass_tools_to_chat_template,
+    )
+    if prefill:
+        row[INPUT_IDS_PROMPT_KEY] = (
+            list(row[INPUT_IDS_PROMPT_KEY]) + tokenizer(prefill, add_special_tokens=False).input_ids
+        )
+    return row
+
+
 def rlvr_filter_v1(
     row: dict[str, Any],
     tokenizer: PreTrainedTokenizer,
@@ -1542,6 +1580,7 @@ TRANSFORM_FNS = {
     "preference_tulu_tokenize_and_truncate_v1": (preference_tulu_tokenize_and_truncate_v1_2, "map"),
     "preference_tulu_filter_v1": (preference_tulu_filter_v1, "filter"),
     "rlvr_tokenize_v1": (rlvr_tokenize_v3, "map"),
+    "rlvr_tokenize_prefill_v1": (rlvr_tokenize_prefill_v1, "map"),
     "rlvr_max_length_filter_v1": (rlvr_max_length_filter_v2, "filter"),
 }
 

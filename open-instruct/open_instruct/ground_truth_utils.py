@@ -9,9 +9,12 @@ import ast
 import asyncio
 import copy
 import dataclasses
+import functools
+import importlib.util
 import json
 import logging
 import os
+import pathlib
 import re
 import string
 import weakref
@@ -219,6 +222,56 @@ class GSM8KVerifier(VerifierFunction):
         extracted = numbers[-1] if numbers else response
         score = float(str(extracted).lower() == str(label).lower())
         return VerificationResult(score=score)
+
+
+# Forgetting/utils/medcalc_grading.py is shared with eval_medcalc_qwen.py so RL reward == eval correctness.
+# Override with MEDCALC_GRADING_PATH if the repo layout differs.
+DEFAULT_MEDCALC_GRADING_PATH = pathlib.Path(__file__).resolve().parents[2] / "utils" / "medcalc_grading.py"
+
+
+@functools.lru_cache(maxsize=1)
+def _load_medcalc_grading():
+    path = pathlib.Path(os.environ.get("MEDCALC_GRADING_PATH", DEFAULT_MEDCALC_GRADING_PATH))
+    spec = importlib.util.spec_from_file_location("medcalc_grading", path)
+    if spec is None or spec.loader is None or not path.exists():
+        raise FileNotFoundError(f"medcalc_grading.py not found at {path}; set MEDCALC_GRADING_PATH.")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class MedCalcVerifier(VerifierFunction):
+    """
+    Verifier for MedCalc-Bench: parses <answer>{"answer": ...}</answer> and grades it with the
+    benchmark's type-dependent rules (exact match for dates / rule-based scores, the row's
+    [lower_limit, upper_limit] band or relative tolerance for equation-based ones).
+
+    The label is a JSON string (or dict) with keys ground_truth_answer, category, output_type,
+    lower_limit, upper_limit.
+    """
+
+    def __init__(self, verifier_config: VerifierConfig | None = None) -> None:
+        super().__init__("medcalc", verifier_config=verifier_config, weight=1.0)
+
+    def __call__(
+        self,
+        tokenized_prediction: list[int],
+        prediction: str,
+        label: Any,
+        query: str | None = None,
+        rollout_state: dict | None = None,
+    ) -> VerificationResult:
+        grading = _load_medcalc_grading()
+        target = json.loads(label) if isinstance(label, str) else label
+        correct = grading.grade(
+            grading.extract_answer(prediction),
+            target["ground_truth_answer"],
+            category=target.get("category"),
+            output_type=target.get("output_type"),
+            lower_limit=target.get("lower_limit"),
+            upper_limit=target.get("upper_limit"),
+        )
+        return VerificationResult(score=float(correct))
 
 
 class MathVerifier(VerifierFunction):
